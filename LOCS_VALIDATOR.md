@@ -1,57 +1,55 @@
-# LOCS Module Validator (v1.2)
+# LOCS Module Validator (v1.4)
 
-Use this checklist to validate a module before registration. 
-
----
-
-## 1. Metadata Header (Section 1)
-
-- [ ] `@locs-version: 1.1` is present.
-- [ ] `@key: value` syntax is strictly followed (colon required).
-- [ ] `@module-id` follows `<domain>.<verb-noun>` format.
-- [ ] `@primary-capability` and `@sub-capabilities` are defined and atomic.
-- [ ] `@token-metrics` block is present and populated (header, implementation, ratio).
-- [ ] `@capability-score` is present and grade is ≥ C.
-- [ ] No prose paragraphs in metadata.
-- [ ] Header is ≤ 50 lines.
+Use this checklist before registration.
 
 ---
 
-## 2. Public Interface (Section 2)
+## 1. Metadata Header
 
-- [ ] All exported functions and types are declared.
-- [ ] Section contains **ZERO** implementation logic.
-- [ ] Section follows immediately after metadata.
+- [ ] `@locs-version: 1.2` is present.
+- [ ] Strict `@key: value` syntax is used.
+- [ ] `@module-id` follows `<domain>.<verb-noun>`.
+- [ ] `@primary-capability` and `@sub-capabilities` are atomic.
+- [ ] `@token-metrics` is populated, including tokenizer backend.
+- [ ] `@capability-score` is populated and grade is `A`, `B`, or `C`.
+- [ ] Header is 80 non-empty lines or less.
+
+## 2. Token Backend
+
+- [ ] OpenAI counts use `tiktoken` when exact counts are desired.
+- [ ] Hugging Face counts use `transformers` tokenizers when exact counts are desired.
+- [ ] SentencePiece counts use a real model file when exact counts are desired.
+- [ ] Heuristic fallback is acceptable only when no exact backend is available.
+
+## 3. Implementation Consistency
+
+- [ ] Python modules pass built-in AST checks.
+- [ ] JavaScript/TypeScript modules use Tree-sitter checks when installed.
+- [ ] Declared `@inputs` appear in parsed signatures.
+- [ ] Declared `@outputs` are represented in code.
+- [ ] `@side-effects` matches actual behavior.
+
+## 4. Dependency Integrity
+
+- [ ] Internal dependencies exist in the selected registry.
+- [ ] No circular dependency is introduced.
+- [ ] `@dependency-depth` matches computed depth.
+- [ ] Dependency depth stays within the cap.
+
+## 5. Registry Scope
+
+- [ ] Use `LOCS_REGISTRY.md` for normal project routing.
+- [ ] Use `LOCS_GRAND_REGISTRY.md` only for intentional cross-project sharing.
 
 ---
 
-## 3. Behaviour Contract (Section 3)
-
-- [ ] Clear declarative guarantees (Pure, Side Effects, Mutation).
-- [ ] Determinism class matches `@determinism` field.
-
----
-
-## 4. Implementation Consistency (Section 4)
-
-- [ ] **Static Consistency**: All `@inputs` names are physically present in implementation signatures.
-- [ ] **Static Consistency**: All `@outputs` types are present in the file.
-- [ ] File is ≤ 400 LOC.
-- [ ] Individual functions are ≤ 50 LOC.
-- [ ] No undeclared internal dependencies.
-
----
-
-## 5. Registry Integrity (Section 5)
-
-- [ ] All internal dependencies listed in `@dependencies` exist in `LOCS_REGISTRY.md`.
-- [ ] Module ID does not collide with existing registry entries.
-
----
-
-## Validation Command
+## Commands
 
 ```bash
-locs validate <file_path>
+locs score <file> --write
+locs validate <file>
+locs register <file>
+
+# Optional shared registry
+locs register <file> --scope shared
 ```
-The CLI tool automates 90% of this checklist. Manual review is only required for semantic capability boundaries.

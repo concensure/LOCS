@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "locs-cli"
-version = "1.2.0"
+version = "1.4.0"
 description = "LLM-Optimised Capability Specification CLI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,22 @@ classifiers = [
 
 [project.scripts]
 locs = "locs:main"
+
+[project.optional-dependencies]
+openai = ["tiktoken>=0.7.0"]
+huggingface = ["transformers>=4.40.0"]
+google = ["sentencepiece>=0.2.0"]
+js_ast = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-languages>=1.10.2",
+]
+full = [
+    "tiktoken>=0.7.0",
+    "transformers>=4.40.0",
+    "sentencepiece>=0.2.0",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-languages>=1.10.2",
+]
 
 [tool.setuptools]
 py-modules = ["locs"]
