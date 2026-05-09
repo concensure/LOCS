@@ -1,0 +1,14 @@
+[package]
+name = "guardpatch-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+guardpatch-policy = { path = "../guardpatch-policy" }
+guardpatch-patch = { path = "../guardpatch-patch" }
+guardpatch-parse = { path = "../guardpatch-parse" }
+guardpatch-locs = { path = "../guardpatch-locs" }
+anyhow = { workspace = true }
+serde = { workspace = true }

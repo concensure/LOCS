@@ -1,0 +1,18 @@
+[package]
+name = "guardpatch-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+guardpatch-core = { path = "../guardpatch-core" }
+guardpatch-policy = { path = "../guardpatch-policy" }
+guardpatch-patch = { path = "../guardpatch-patch" }
+guardpatch-audit = { path = "../guardpatch-audit" }
+guardpatch-lifecycle = { path = "../guardpatch-lifecycle" }
+chrono = { workspace = true }

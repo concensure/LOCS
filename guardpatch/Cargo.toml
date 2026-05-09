@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/guardpatch-core",
+    "crates/guardpatch-cli",
+    "crates/guardpatch-policy",
+    "crates/guardpatch-parse",
+    "crates/guardpatch-patch",
+    "crates/guardpatch-locs",
+    "crates/guardpatch-audit",
+    "crates/guardpatch-lifecycle",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["LOCS Maintainers"]
+license = "MIT"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+walkdir = "2.5"
+glob = "0.3"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tree-sitter = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+pulldown-cmark = "0.11"
+similar = "2.5"
+patch = "0.7"
+uuid = { version = "1.8", features = ["v4", "serde"] }

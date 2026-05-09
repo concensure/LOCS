@@ -1,0 +1,13 @@
+[package]
+name = "guardpatch-locs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+guardpatch-policy = { path = "../guardpatch-policy" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+regex = "1.10"

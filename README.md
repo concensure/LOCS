@@ -16,6 +16,18 @@ LOCS addresses that by turning source files into self-describing capability unit
 
 ---
 
+## Benefits
+
+- **Fewer wasted tokens** — LLMs load only the capabilities they need via registry routing instead of blindly reading entire files.
+- **Predictable retrieval** — self-describing metadata and strict `@key: value` syntax give LLMs a consistent surface to query, reducing hallucinated file paths and wrong module guesses.
+- **Governance by default** — AST-backed validation catches mismatches between what metadata claims and what code actually does before they reach a model context.
+- **Auditable token budgets** — per-file `@token-metrics` with a recorded backend make cost comparisons reproducible across models and providers.
+- **Composable capability graph** — dependency declarations and circular-dependency detection let LLMs reason about safe composition order without reading implementation bodies.
+- **Cross-project reuse** — the optional `LOCS_GRAND_REGISTRY.md` lets shared capabilities be discovered and routed across repos without duplicating code.
+- **Model-agnostic** — token counting backends (tiktoken, transformers, sentencepiece, heuristic) mean the same framework works whether you are targeting GPT-4o, Qwen, Gemini, or a local model.
+
+---
+
 ## Registry Model
 
 `LOCS_REGISTRY.md` is the default project-local registry.
