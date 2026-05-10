@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LOCS CLI (v1.4)
-Commands: new | score | validate | register | status | bootstrap
+Commands: new | score | validate | register | status | bootstrap | init
 Optional tokenizer and AST backends with deterministic fallbacks.
 """
 
@@ -167,6 +167,165 @@ DEFAULT_HEADER_TEMPLATE = """\
 {implementation_stub}
 
 {example_stub}
+"""
+
+# ── Init: bundled document content ──────────────────────────────────────────
+
+_INIT_SKILL_MD = """\
+# Claude / Codex Skill: LOCS-Compliant Development (v1.4)
+
+This document defines the generation rules for the LOCS framework.
+
+---
+
+## 1. Role
+
+You are an expert software architect specialising in LOCS v1.4.
+
+Generate only:
+
+- modular, atomic capability files
+- deterministic, machine-readable code
+- retrieval-optimised modules
+- governance-enforceable artefacts
+
+---
+
+## 2. Core Principles
+
+**LLM-First Design**
+
+- strict `@key: value` metadata headers
+- predictable section layout
+- low-noise retrieval surface
+
+**Atomic Capability**
+
+- one module = one primary capability
+- explicit `@primary-capability` and `@sub-capabilities`
+
+**Governance and Integrity**
+
+- declared inputs must match implementation
+- internal dependencies must exist in the selected registry
+- local registry is default
+- shared registry is optional
+- token metrics must record the backend used
+
+---
+
+## 3. Validation Expectations
+
+- Python modules should satisfy built-in `ast` checks.
+- JavaScript/TypeScript modules should satisfy Tree-sitter checks when the optional AST extras are installed.
+- If exact tokenizer support is available, use it instead of heuristic counting.
+
+---
+
+## 4. Workflow
+
+1. `locs new <id>`
+2. implement the module
+3. `locs score <file> --write`
+4. `locs validate <file>`
+5. `locs register <file>`
+6. optional shared publication via `locs register <file> --scope shared`
+7. `locs bootstrap --limit 5`
+"""
+
+_INIT_SESSION_INIT_MD = """\
+# LOCS Session Init (v1.4)
+
+Paste this file into an LLM session to activate LOCS governance.
+
+---
+
+## Workflow
+
+```bash
+# 1. Scaffold
+locs new <id>
+
+# 2. Implement
+
+# 3. Score and validate
+locs score <file> --write
+locs validate <file>
+
+# 4. Register locally by default
+locs register <file>
+
+# 5. Optional shared publication
+locs register <file> --scope shared
+
+# 6. Bootstrap compact context
+locs bootstrap --category <slug> --limit 5
+```
+
+---
+
+## Session Rules
+
+- Prefer local registry routing first.
+- Use shared registry only when cross-project reuse matters.
+- Treat token metrics as backend-specific.
+- Trust AST-backed validation over regex fallback when available.
+- Load implementations only after registry and metadata routing.
+"""
+
+_INIT_PRE_COMMIT = """\
+#!/usr/bin/env bash
+# LOCS pre-commit hook — installed by `locs init`
+# Validates every staged LOCS module before allowing a commit.
+set -euo pipefail
+
+if ! command -v locs &>/dev/null; then
+  echo "[locs] locs CLI not found in PATH — skipping LOCS validation"
+  exit 0
+fi
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+LOCS_FILES=()
+for f in $STAGED; do
+  [[ -f "$f" ]] || continue
+  if grep -q "@locs-version" "$f" 2>/dev/null; then
+    LOCS_FILES+=("$f")
+  fi
+done
+
+if [[ ${#LOCS_FILES[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+echo "[locs] validating ${#LOCS_FILES[@]} staged module(s)..."
+FAILED=0
+for f in "${LOCS_FILES[@]}"; do
+  if locs validate "$f"; then :; else FAILED=$((FAILED + 1)); fi
+done
+
+if [[ $FAILED -gt 0 ]]; then
+  echo ""
+  echo "[locs] $FAILED module(s) failed validation — commit blocked"
+  echo "       fix the issues above, then re-stage and commit"
+  exit 1
+fi
+echo "[locs] all modules passed — proceeding with commit"
+exit 0
+"""
+
+_INIT_CLAUDE_MD_SECTION = """\
+
+## LOCS — LLM-Optimised Capability Specification
+
+This project uses LOCS v1.4. When writing or editing source files:
+
+- Load `LOCS_SKILL.md` for generation rules before creating any module
+- Load `LOCS_SESSION_INIT.md` to activate the session workflow
+- Use `locs validate <file>` before registering any module
+- Use `locs new <id>` to scaffold new capability files
+- Use `locs bootstrap --limit 5` to load compact routing context
+
+Run `locs status` to see the current registry.
 """
 
 
@@ -1211,6 +1370,307 @@ def cmd_bootstrap(args):
     print("---------------------------------------------")
 
 
+# ── Init: helpers ────────────────────────────────────────────────────────────
+
+_INIT_SOURCE_EXTS = {".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".c", ".cpp", ".rb", ".cs"}
+_INIT_CONFIG_NAMES = {
+    "Cargo.toml", "pyproject.toml", "package.json", "go.mod",
+    "build.gradle", ".guardpatch.yml", "CLAUDE.md",
+}
+_INIT_IGNORE_DIRS = {
+    ".git", "node_modules", "target", "__pycache__",
+    ".venv", "venv", ".tox", "dist", "build", ".mypy_cache",
+}
+
+
+def _scan_project_for_init(root: Path) -> dict:
+    ext_counts: dict[str, int] = {}
+    source_dirs: set[str] = set()
+    found_configs: list[str] = []
+    locs_count = 0
+
+    for path in root.rglob("*"):
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(p in _INIT_IGNORE_DIRS for p in rel.parts):
+            continue
+        if not path.is_file():
+            continue
+        ext = path.suffix.lower()
+        ext_counts[ext] = ext_counts.get(ext, 0) + 1
+        if ext in _INIT_SOURCE_EXTS and len(rel.parts) > 1 and not rel.parts[0].startswith("."):
+            source_dirs.add(rel.parts[0])
+        if path.name in _INIT_CONFIG_NAMES:
+            found_configs.append(path.name)
+        if ext in _INIT_SOURCE_EXTS:
+            try:
+                snippet = path.read_text(encoding="utf-8", errors="ignore")[:512]
+                if "@locs-version" in snippet:
+                    locs_count += 1
+            except Exception:
+                pass
+
+    return {
+        "ext_counts": ext_counts,
+        "source_dirs": sorted(source_dirs),
+        "config_files": list(dict.fromkeys(found_configs)),
+        "has_git": (root / ".git").exists(),
+        "has_claude_md": (root / "CLAUDE.md").is_file(),
+        "has_guardpatch": (root / ".guardpatch.yml").is_file(),
+        "has_locs_registry": (root / "LOCS_REGISTRY.md").is_file(),
+        "locs_count": locs_count,
+        "project_name": root.name,
+    }
+
+
+def _detect_recommended_paths(scan: dict) -> list[str]:
+    patterns: list[str] = []
+    for src_dir in scan["source_dirs"]:
+        patterns.append(f"{src_dir}/**")
+    for cfg in scan["config_files"]:
+        if cfg != "CLAUDE.md":
+            patterns.append(cfg)
+    patterns.append(".guardpatch.yml")
+    seen: set[str] = set()
+    deduped = []
+    for p in patterns:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return deduped
+
+
+def _build_guardpatch_yml(project_name: str, mode: str, protected: list[str], lock_lines: int) -> str:
+    project_mode = "protected" if mode == "strict" else "editable"
+    lines = [
+        "project:",
+        f"  name: {project_name}",
+        f"  mode: {project_mode}",
+    ]
+    if mode == "selective" and protected:
+        lines.append("")
+        lines.append("paths:")
+        for pattern in protected:
+            lines.append(f'  - pattern: "{pattern}"')
+            lines.append("    mode: protected")
+    elif mode == "strict":
+        editable = ["README.md", "docs/**", "LOCS_REGISTRY.md", "LOCS_GRAND_REGISTRY.md"]
+        lines.append("")
+        lines.append("paths:")
+        for pattern in editable:
+            lines.append(f'  - pattern: "{pattern}"')
+            lines.append("    mode: editable")
+    if lock_lines > 0:
+        lines.append("")
+        lines.append(f"lock_first_lines: {lock_lines}")
+    return "\n".join(lines) + "\n"
+
+
+def _ask_init(prompt: str, default: str) -> str:
+    try:
+        val = input(f"  {prompt} [{default}]: ").strip()
+        return val if val else default
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
+def _print_scan_summary(scan: dict) -> None:
+    print()
+    src_exts = {e: c for e, c in scan["ext_counts"].items() if e in _INIT_SOURCE_EXTS}
+    if src_exts:
+        ext_summary = ", ".join(
+            f"{e.lstrip('.')} ({c})" for e, c in sorted(src_exts.items(), key=lambda x: -x[1])[:5]
+        )
+        print(f"  Languages:    {ext_summary}")
+    if scan["source_dirs"]:
+        print(f"  Source dirs:  {', '.join(scan['source_dirs'][:6])}")
+    if scan["config_files"]:
+        print(f"  Configs:      {', '.join(scan['config_files'])}")
+    print(f"  Git repo:     {'yes' if scan['has_git'] else 'no'}")
+    print(f"  CLAUDE.md:    {'exists' if scan['has_claude_md'] else 'not found'}")
+    print(f"  GuardPatch:   {'configured' if scan['has_guardpatch'] else 'not configured'}")
+    print(f"  LOCS modules: {scan['locs_count']}")
+    print()
+
+
+def _ask_guardpatch_questions(scan: dict) -> tuple[str, int, list[str]]:
+    rec_paths = _detect_recommended_paths(scan)
+    rec_paths_str = ",".join(rec_paths) if rec_paths else "src/**,.guardpatch.yml"
+
+    print("-" * 68)
+    print("  GuardPatch protects files from unintended LLM edits.")
+    print("  Answer 3 questions (press Enter to accept the default).")
+    print("-" * 68)
+    print()
+
+    print("(1/3) Protection mode")
+    print("  strict    → All files protected; you list what LLMs may edit.")
+    print("              Best for: tightly locked codebases.")
+    print("              Risk: blocks doc/test edits unless explicitly allowed.")
+    print("  selective → Only listed paths protected; everything else is editable.")
+    print("              Best for: most projects — source locked, docs free.")
+    print("              Risk: new source files unprotected until added to config.")
+    print("  none      → Skip guardpatch setup entirely.")
+    print()
+    if scan["source_dirs"]:
+        print("  Recommendation: selective — source dirs and configs benefit from")
+        print("  protection; docs and markdown should stay freely editable.")
+    else:
+        print("  Recommendation: selective")
+    print()
+    mode = _ask_init("Choice", "selective")
+    if mode not in {"strict", "selective", "none"}:
+        mode = "selective"
+    print()
+
+    if mode == "none":
+        return "none", 0, []
+
+    print("(2/3) Lock first N header lines of every file?")
+    print("  Prevents LLMs from rewriting LOCS metadata headers, shebangs,")
+    print("  or licence notices at the top of each file. Set 0 to disable.")
+    rec_lines = "10" if scan["locs_count"] > 0 else "0"
+    if scan["locs_count"] > 0:
+        print(f"  Recommendation: {rec_lines} — matches standard LOCS header length.")
+    else:
+        print(f"  Recommendation: {rec_lines} — no existing LOCS modules detected.")
+    print()
+    raw_lines = _ask_init("Lines", rec_lines)
+    try:
+        lock_lines = max(0, int(raw_lines))
+    except ValueError:
+        lock_lines = int(rec_lines)
+    print()
+
+    print("(3/3) Protected path patterns (comma-separated globs)")
+    print("  These paths will be locked against unintended LLM modifications.")
+    if scan["source_dirs"]:
+        print(f"  Detected source: {', '.join(scan['source_dirs'][:4])}")
+    if scan["config_files"]:
+        print(f"  Detected configs: {', '.join(scan['config_files'])}")
+    print(f"  Recommendation: {rec_paths_str}")
+    print()
+    raw_paths = _ask_init("Patterns", rec_paths_str)
+    protected = [p.strip() for p in raw_paths.split(",") if p.strip()]
+    print()
+
+    return mode, lock_lines, protected
+
+
+def _install_pre_commit_hook(hook_path: Path, content: str) -> None:
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8")
+        if "locs" in existing:
+            print("  skipped  .git/hooks/pre-commit (LOCS block already present)")
+            return
+        hook_path.write_text(existing.rstrip() + "\n\n" + content, encoding="utf-8")
+        print("  patched  .git/hooks/pre-commit (appended LOCS block)")
+    else:
+        hook_path.write_text(content, encoding="utf-8")
+        try:
+            import stat as _stat
+            hook_path.chmod(hook_path.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+        except Exception:
+            pass
+        print("  wrote    .git/hooks/pre-commit")
+
+
+def _patch_or_create_claude_md(path: Path, section: str) -> None:
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        if "## LOCS" in text:
+            print("  skipped  CLAUDE.md (LOCS section already present)")
+            return
+        path.write_text(text.rstrip() + "\n" + section, encoding="utf-8")
+        print("  patched  CLAUDE.md (added LOCS section)")
+    else:
+        path.write_text(f"# {path.parent.name}\n" + section, encoding="utf-8")
+        print("  wrote    CLAUDE.md")
+
+
+def cmd_init(args):
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    dry_run = args.dry_run
+    yes = args.yes
+
+    print(f"[locs init] Scanning {root} ...")
+    scan = _scan_project_for_init(root)
+    _print_scan_summary(scan)
+
+    # Resolve guardpatch config
+    skip_guardpatch = scan["has_guardpatch"] and not args.force
+    if skip_guardpatch:
+        print("  note: .guardpatch.yml already exists (use --force to overwrite)\n")
+        gp_mode, lock_lines, protected = "skip", 0, []
+    elif yes or dry_run:
+        gp_mode = "selective"
+        lock_lines = 10 if scan["locs_count"] > 0 else 0
+        protected = _detect_recommended_paths(scan)
+    else:
+        gp_mode, lock_lines, protected = _ask_guardpatch_questions(scan)
+
+    # Build action list
+    actions: list[tuple[str, Path, str]] = []
+
+    skill_path = root / "LOCS_SKILL.md"
+    if not skill_path.exists() or args.force:
+        actions.append(("write", skill_path, _INIT_SKILL_MD))
+
+    session_path = root / "LOCS_SESSION_INIT.md"
+    if not session_path.exists() or args.force:
+        actions.append(("write", session_path, _INIT_SESSION_INIT_MD))
+
+    if gp_mode not in {"skip", "none"}:
+        gp_content = _build_guardpatch_yml(scan["project_name"], gp_mode, protected, lock_lines)
+        actions.append(("write", root / ".guardpatch.yml", gp_content))
+
+    if not scan["has_locs_registry"]:
+        actions.append(("write", root / "LOCS_REGISTRY.md", LOCAL_REGISTRY_TEMPLATE))
+
+    if scan["has_git"] and not args.no_hook:
+        actions.append(("hook", root / ".git" / "hooks" / "pre-commit", _INIT_PRE_COMMIT))
+
+    if not args.no_claude_md:
+        actions.append(("claude_md", root / "CLAUDE.md", _INIT_CLAUDE_MD_SECTION))
+
+    # Print plan
+    print("-" * 68)
+    print("  Actions:")
+    for kind, path, _ in actions:
+        rel = path.relative_to(root) if path.is_relative_to(root) else path
+        if kind == "hook":
+            label = "install"
+        elif kind == "claude_md":
+            label = "patch  " if path.exists() else "create "
+        else:
+            label = "write  "
+        print(f"    {label}  {rel}")
+    print("-" * 68)
+
+    if dry_run:
+        print("\n[dry-run] no files written")
+        return
+
+    print()
+    for kind, path, content in actions:
+        if kind == "write":
+            path.write_text(content, encoding="utf-8")
+            rel = path.relative_to(root)
+            print(f"  wrote    {rel}")
+        elif kind == "hook":
+            _install_pre_commit_hook(path, content)
+        elif kind == "claude_md":
+            _patch_or_create_claude_md(path, content)
+
+    print()
+    print(f"[locs init] done - {scan['project_name']} is ready for LOCS governance")
+    print("  next: locs new <domain.verb-noun>  to scaffold your first module")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="locs", description="LOCS CLI v1.4")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1252,6 +1712,20 @@ def main():
     p_boot.add_argument("--registry")
     p_boot.add_argument("--scope", choices=["auto", "local", "shared"], default="auto")
 
+    p_init = sub.add_parser("init", help="Initialise LOCS governance in a project")
+    p_init.add_argument("directory", nargs="?", default=None, metavar="DIR",
+                        help="Target project directory (default: current directory)")
+    p_init.add_argument("--dry-run", action="store_true",
+                        help="Show what would be done without writing any files")
+    p_init.add_argument("--yes", "-y", action="store_true",
+                        help="Accept all recommended defaults without prompting")
+    p_init.add_argument("--force", action="store_true",
+                        help="Overwrite existing .guardpatch.yml and doc files")
+    p_init.add_argument("--no-hook", action="store_true",
+                        help="Skip pre-commit hook installation")
+    p_init.add_argument("--no-claude-md", action="store_true",
+                        help="Skip CLAUDE.md creation/patch")
+
     args = parser.parse_args()
     {
         "new": cmd_new,
@@ -1260,6 +1734,7 @@ def main():
         "register": cmd_register,
         "status": cmd_status,
         "bootstrap": cmd_bootstrap,
+        "init": cmd_init,
     }[args.command](args)
 
 

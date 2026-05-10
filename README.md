@@ -67,9 +67,50 @@ LOCS records the backend in `@token-metrics` so counts remain auditable.
 
 ---
 
+## Quick Start
+
+Install the framework and initialise LOCS governance in your project with a single sequence:
+
+```bash
+pip install locs-cli && locs init
+```
+
+`locs init` scans your project, asks three short GuardPatch questions (with recommendations based on what it finds), then writes:
+
+- `LOCS_SKILL.md` — generation rules for LLM sessions
+- `LOCS_SESSION_INIT.md` — session bootstrap workflow
+- `.guardpatch.yml` — file-protection policy tuned to your project
+- `LOCS_REGISTRY.md` — local capability registry
+- `.git/hooks/pre-commit` — validates LOCS modules before every commit
+- `CLAUDE.md` — patched with a LOCS section so Claude picks up the rules automatically
+
+**Flags:**
+
+| Flag | Effect |
+|------|--------|
+| `--yes` / `-y` | Accept all recommended defaults, no prompts |
+| `--dry-run` | Preview what would be written, write nothing |
+| `--force` | Overwrite existing `.guardpatch.yml` and doc files |
+| `--no-hook` | Skip pre-commit hook installation |
+| `--no-claude-md` | Skip `CLAUDE.md` creation/patch |
+
+To install into a different directory:
+
+```bash
+locs init /path/to/project
+```
+
+---
+
 ## Installation
 
 Base install:
+
+```bash
+pip install locs-cli
+```
+
+Editable (development) install from source:
 
 ```bash
 pip install -e .
@@ -78,11 +119,11 @@ pip install -e .
 Optional extras:
 
 ```bash
-pip install -e .[openai]
-pip install -e .[huggingface]
-pip install -e .[google]
-pip install -e .[js_ast]
-pip install -e .[full]
+pip install locs-cli[openai]
+pip install locs-cli[huggingface]
+pip install locs-cli[google]
+pip install locs-cli[js_ast]
+pip install locs-cli[full]
 ```
 
 ---
@@ -90,7 +131,16 @@ pip install -e .[full]
 ## Usage
 
 ```bash
-# Scaffold
+# Initialise governance in a project (interactive)
+locs init
+
+# Accept all recommended defaults without prompting
+locs init --yes
+
+# Preview what would be written
+locs init --dry-run
+
+# Scaffold a new module
 locs new graph.smart-port-selector --ext .py
 
 # Score with automatic backend selection

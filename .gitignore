@@ -1,1 +1,8 @@
 docs/
+__pycache__/
+*.pyc
+locs_cli.egg-info/
+guardpatch/target/
+guardpatch/.guardpatch/
+*.patch
+test.txt

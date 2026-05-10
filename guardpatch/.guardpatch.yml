@@ -1,0 +1,15 @@
+project:
+  name: guardpatch
+  mode: editable
+
+paths:
+  - pattern: "crates/**"
+    mode: protected
+  - pattern: "Cargo.toml"
+    mode: protected
+  - pattern: ".guardpatch.yml"
+    mode: protected
+  - pattern: "README.md"
+    mode: editable
+
+lock_first_lines: 10

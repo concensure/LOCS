@@ -1,0 +1,4 @@
+project:
+  name: locked_lines_test
+  mode: editable
+lock_first_lines: 2

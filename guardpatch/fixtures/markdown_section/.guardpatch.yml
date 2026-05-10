@@ -1,0 +1,6 @@
+project:
+  name: markdown_test
+  mode: editable
+
+lock_sections:
+  - Architecture

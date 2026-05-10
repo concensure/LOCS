@@ -8,22 +8,22 @@ Paste this file into an LLM session to activate LOCS governance.
 
 ```bash
 # 1. Scaffold
-python locs.py new <id>
+locs new <id>
 
 # 2. Implement
 
 # 3. Score and validate
-python locs.py score <file> --write
-python locs.py validate <file>
+locs score <file> --write
+locs validate <file>
 
 # 4. Register locally by default
-python locs.py register <file>
+locs register <file>
 
 # 5. Optional shared publication
-python locs.py register <file> --scope shared
+locs register <file> --scope shared
 
 # 6. Bootstrap compact context
-python locs.py bootstrap --category <slug> --limit 5
+locs bootstrap --category <slug> --limit 5
 ```
 
 ---
