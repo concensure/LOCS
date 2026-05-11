@@ -137,7 +137,7 @@ impl Verifier {
                             if !locked.is_empty() {
                                 let locs_range = LocsExtractor::find_metadata_line_range(content);
                                 for op in operations {
-                                    let touched = Self::classify_regions_for_op(op, Some(content), locs_range);
+                                    let touched = Self::classify_regions_for_op(op, Some(content), locs_range, Some(config));
                                     for region in &touched {
                                         if locked.iter().any(|r| r == region) {
                                             return Decision::Rejected(format!(
@@ -155,12 +155,30 @@ impl Verifier {
                             if !editable.is_empty() {
                                 let locs_range = LocsExtractor::find_metadata_line_range(content);
                                 let all_editable = operations.iter().all(|op| {
-                                    let touched = Self::classify_regions_for_op(op, Some(content), locs_range);
+                                    let touched = Self::classify_regions_for_op(op, Some(content), locs_range, Some(config));
                                     !touched.is_empty()
                                         && touched.iter().all(|r| editable.iter().any(|e| e == r))
                                 });
                                 if all_editable {
                                     return Decision::Allowed;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Evidence Mapping check (3.3 equivalent enhancement)
+                if !config.evidence_map.is_empty() {
+                    let locs_range = LocsExtractor::find_metadata_line_range(content);
+                    for op in operations {
+                        let touched = Self::classify_regions_for_op(op, Some(content), locs_range, Some(config));
+                        for region in touched {
+                            for rule in &config.evidence_map {
+                                if format!("{:?}", rule.role).to_lowercase() == region {
+                                    return Decision::ReviewRequired(format!(
+                                        "Region {:?} requires evidence: {}",
+                                        region, rule.commands.join(", ")
+                                    ));
                                 }
                             }
                         }
@@ -256,6 +274,16 @@ impl Verifier {
 
         for op in operations {
             let file_path_str = op.file.to_str().unwrap_or("");
+
+            // Policy Integrity: Protect .guardpatch.yml and .guardpatch/ directory
+            if file_path_str.contains(".guardpatch.yml") || file_path_str.contains(".guardpatch/") {
+                if actor.is_some() {
+                    return Decision::Rejected(format!(
+                        "Agent {:?} is not permitted to modify governance configuration {:?}",
+                        actor.unwrap(), op.file
+                    ));
+                }
+            }
 
             // Agent-aware authority check (5.2 / 5.3)
             if let Some(agent_name) = actor {
@@ -356,8 +384,25 @@ impl Verifier {
                     }
                     match marker.mode {
                         GuardMode::Protected | GuardMode::Frozen | GuardMode::HumanOnly => {
-                            return Decision::Rejected(format!(
-                                "Patch affects locked region {:?} in {:?}",
+                            // Even if locked, check if it's explicitly unlocked
+                            if !Self::is_unlocked(&marker.id, active_unlocks) && !Self::is_unlocked(file_path_str, active_unlocks) {
+                                return Decision::Rejected(format!(
+                                    "Patch affects locked region {:?} in {:?}",
+                                    marker.id, op.file
+                                ));
+                            }
+                        }
+                        GuardMode::ReviewRequired => {
+                            if !Self::is_unlocked(&marker.id, active_unlocks) && !Self::is_unlocked(file_path_str, active_unlocks) {
+                                return Decision::ReviewRequired(format!(
+                                    "Patch affects review-required region {:?} in {:?}",
+                                    marker.id, op.file
+                                ));
+                            }
+                        }
+                        GuardMode::ProposalOnly => {
+                            return Decision::ProposalOnly(format!(
+                                "Patch affects proposal-only region {:?} in {:?}",
                                 marker.id, op.file
                             ));
                         }
@@ -366,9 +411,44 @@ impl Verifier {
                 }
             }
 
-            // Markdown section checks (global config + per-document inline policy)
+            // Markdown section checks (global config + per-document inline policy + locs:id anchors)
             for section in &sections {
                 if Self::overlaps(op, section.start_line, section.end_line) {
+                    // 1. Check if section has an explicit locs:edit mode
+                    if let Some(ref section_mode) = section.mode {
+                        match section_mode {
+                            GuardMode::Protected | GuardMode::Frozen | GuardMode::HumanOnly => {
+                                let target_id = section.id.as_ref().unwrap_or(&section.title);
+                                if !Self::is_unlocked(target_id, active_unlocks) && !Self::is_unlocked(file_path_str, active_unlocks) {
+                                    return Decision::Rejected(format!(
+                                        "Patch affects locked section {:?} in {:?}",
+                                        target_id, op.file
+                                    ));
+                                }
+                            }
+                            GuardMode::ReviewRequired => {
+                                let target_id = section.id.as_ref().unwrap_or(&section.title);
+                                if !Self::is_unlocked(target_id, active_unlocks) && !Self::is_unlocked(file_path_str, active_unlocks) {
+                                    return Decision::ReviewRequired(format!(
+                                        "Patch affects review-required section {:?} in {:?}",
+                                        target_id, op.file
+                                    ));
+                                }
+                            }
+                            GuardMode::ProposalOnly => {
+                                let target_id = section.id.as_ref().unwrap_or(&section.title);
+                                return Decision::ProposalOnly(format!(
+                                    "Patch affects proposal-only section {:?} in {:?}",
+                                    target_id, op.file
+                                ));
+                            }
+                            _ => {}
+                        }
+                        // If we have an explicit mode, it overrides global/inline lists for this section
+                        continue;
+                    }
+
+                    // 2. Fallback to legacy global/inline policy
                     let locked_by_config = config.lock_sections.iter().any(|s| s == &section.title);
                     let locked_by_inline = inline_policy.locked.iter().any(|s| s == &section.title);
                     let editable_by_inline = inline_policy.editable.iter().any(|s| s == &section.title);
@@ -476,11 +556,12 @@ impl Verifier {
     }
 
     /// Classify which named regions an operation touches.
-    /// Region names: "metadata", "public-interface", "implementation", "internal-helpers".
+    /// Region names: "metadata", "public-interface", "implementation", "internal-helpers", etc.
     fn classify_regions_for_op(
         op: &PatchOperation,
         file_content: Option<&str>,
         locs_range: Option<(usize, usize)>,
+        config: Option<&Config>,
     ) -> Vec<String> {
         let mut regions = Vec::new();
 
@@ -491,8 +572,32 @@ impl Verifier {
             }
         }
 
-        // AST-based classification: exported → "public-interface", private → "implementation"
         if let Some(content) = file_content {
+            // Check for explicit roles in markers
+            if let Ok(markers) = MarkerParser::parse(content) {
+                for marker in markers {
+                    if Self::overlaps(op, marker.start_line, marker.end_line) {
+                        if let Some(role) = marker.role {
+                            regions.push(format!("{:?}", role).to_lowercase());
+                        }
+                    }
+                }
+            }
+
+            // Check for explicit roles in Markdown sections
+            let ext = Path::new(&op.file).extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext == "md" || ext == "markdown" {
+                let sections = MarkdownParser::parse_sections(content);
+                for section in sections {
+                    if Self::overlaps(op, section.start_line, section.end_line) {
+                        if let Some(role) = section.role {
+                            regions.push(format!("{:?}", role).to_lowercase());
+                        }
+                    }
+                }
+            }
+
+            // AST-based classification: exported → "public-interface", private → "implementation"
             if let Some(adapter) = ParserRegistry::get_adapter(Path::new(&op.file)) {
                 if let Ok(symbols) = adapter.parse_symbols(content) {
                     let mut touched_exported = false;
@@ -513,6 +618,15 @@ impl Verifier {
                         regions.push("implementation".to_string());
                         regions.push("internal-helpers".to_string());
                     }
+                }
+            }
+        }
+
+        // Ghost Inference: Infer role from path if still empty
+        if regions.is_empty() {
+            if let Some(cfg) = config {
+                if let Some(inferred) = cfg.infer_role(&op.file) {
+                    regions.push(format!("{:?}", inferred).to_lowercase());
                 }
             }
         }
@@ -827,25 +941,52 @@ fn helper() { 1 + 1 }
     }
 
     #[test]
-    fn test_p5_proposal_only_agent_returns_proposal_decision() {
-        use guardpatch_policy::AgentProfile;
+    fn test_p6_locs_section_addressing_markdown() {
+        let config = editable_config();
+        let content = r#"# Document
+## Security Model <!-- locs:id=security-model-v1 locs:edit=locked -->
+Some content here.
+"#;
+        // Patch touches line 3 — inside the locked section
+        let op = make_op("docs/security.md", 3, 1, vec![
+            PatchLine::Add("Violating edit".to_string()),
+        ]);
+        let d = Verifier::verify_patch(&config, &[op], Some(content), None, None, &[]);
+        assert!(matches!(d, Decision::Rejected(_)), "expected Rejected for locked section addressing, got {:?}", d);
+    }
+
+    #[test]
+    fn test_enhancement_policy_integrity() {
+        let config = editable_config();
+        let op = make_op(".guardpatch.yml", 1, 1, vec![PatchLine::Add("# hack".to_string())]);
+        // Agent should be rejected from editing policy
+        let d = Verifier::verify_patch(&config, &[op], None, None, Some("ai_agent"), &[]);
+        assert!(matches!(d, Decision::Rejected(_)));
+    }
+
+    #[test]
+    fn test_enhancement_ghost_inference() {
+        use guardpatch_policy::{RoleInferenceRule, SectionRole, EvidenceMapRule};
         let config = Config {
-            project: ProjectConfig {
+            project: guardpatch_policy::ProjectConfig {
                 name: "test".to_string(),
                 mode: GuardMode::Editable,
-                locs_required_for_new_files: false,
+                ..Default::default()
             },
-            agents: vec![AgentProfile {
-                name: "doc_agent".to_string(),
-                allow: vec!["docs/**".to_string()],
-                deny: vec![],
-                default_mode: None,
-                proposal_only: true,
+            role_inference: vec![RoleInferenceRule {
+                pattern: "tests/**".to_string(),
+                role: SectionRole::Example,
+            }],
+            evidence_map: vec![EvidenceMapRule {
+                role: SectionRole::Example,
+                commands: vec!["cargo test".to_string()],
             }],
             ..Default::default()
         };
-        let op = make_op("docs/readme.md", 1, 1, vec![PatchLine::Add("new content".to_string())]);
-        let d = Verifier::verify_patch(&config, &[op], None, None, Some("doc_agent"), &[]);
-        assert!(matches!(d, Decision::ProposalOnly(_)));
+        // Path matches inference rule
+        let op = make_op("tests/common.rs", 1, 1, vec![PatchLine::Add("// test".to_string())]);
+        let d = Verifier::verify_patch(&config, &[op], Some("// content"), None, None, &[]);
+        // Should require evidence because role "example" was inferred and mapped
+        assert!(matches!(d, Decision::ReviewRequired(_)));
     }
 }

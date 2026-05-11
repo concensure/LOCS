@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-LOCS CLI (v1.4)
-Commands: new | score | validate | register | status | bootstrap | init
+LOCS CLI (v2.0)
+Commands: new | score | validate | register | status | bootstrap | index | init
 Optional tokenizer and AST backends with deterministic fallbacks.
 """
 
 import argparse
 import ast
+import json
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 LOCAL_REGISTRY_FILE = "LOCS_REGISTRY.md"
 SHARED_REGISTRY_FILE = "LOCS_GRAND_REGISTRY.md"
+LOCAL_INDEX_FILE = ".locs.index.json"
 MAX_DEPENDENCY_DEPTH = 5
 MAX_HEADER_LINES = 80
 MINIMUM_PASSING_GRADE = {"A", "B", "C"}
@@ -34,7 +36,7 @@ REQUIRED_FIELDS = [
 
 OPTIONAL_FIELDS = ["summary", "module", "usage-metrics"]
 
-VALID_STABILITY = {"stable", "experimental", "deprecated"}
+VALID_STABILITY = {"draft", "active", "stabilising", "stable", "protected", "frozen"}
 VALID_STATE_MODEL = {"stateless", "explicit-state", "event-driven", "async-io", "external-boundary"}
 VALID_SIDE_EFFECTS = {"none", "explicit", "high"}
 VALID_DETERMINISM = {"deterministic", "probabilistic", "async-nondeterministic"}
@@ -48,13 +50,17 @@ COMMENT_STYLES = {
     ".java": ("/**", " *", " */"),
     ".c": ("/*", " *", " */"),
     ".cpp": ("/*", " *", " */"),
+    ".rb": ("=begin", "#", "=end"),
+    ".sh": ("# BEGIN_LOCS", "#", "# END_LOCS"),
+    ".lua": ("--[[", "", "--]]"),
+    ".php": ("/**", " *", " */"),
 }
 
-LOCAL_REGISTRY_TEMPLATE = """# LOCS Project Registry (v1.4)
+LOCAL_REGISTRY_TEMPLATE = """# LOCS Project Registry (v2.0)
 
 <!-- LOCS-REGISTRY-SCHEMA
 format: markdown-table
-parser: locs-registry-v1.4
+parser: locs-registry-v2.0
 scope: local
 automated-writes: true
 row-format: | module-id | module-name | category | domain | primary-capability | signature | version | stability | file-path | capability-score |
@@ -90,7 +96,7 @@ changelog-row-format: | YYYY-MM-DD | module-id | change |
 
 DEFAULT_HEADER_TEMPLATE = """\
 {comment_start}
-{prefix} @locs-version: 1.2
+{prefix} @locs-version: 2.0
 {prefix} @module-id: {module_id}
 {prefix} @module-name: {module_name}
 {prefix} @category: {category}
@@ -98,7 +104,7 @@ DEFAULT_HEADER_TEMPLATE = """\
 {prefix} @primary-capability: {primary_capability}
 {prefix} @sub-capabilities: {sub_capabilities}
 {prefix} @version: 1.0.0
-{prefix} @stability: stable
+{prefix} @stability: active
 {prefix}
 {prefix} @state-model: stateless
 {prefix} @side-effects: none
@@ -172,7 +178,7 @@ DEFAULT_HEADER_TEMPLATE = """\
 # ── Init: bundled document content ──────────────────────────────────────────
 
 _INIT_SKILL_MD = """\
-# Claude / Codex Skill: LOCS-Compliant Development (v1.4)
+# Claude / Codex Skill: LOCS-Compliant Development (v2.0)
 
 This document defines the generation rules for the LOCS framework.
 
@@ -180,7 +186,7 @@ This document defines the generation rules for the LOCS framework.
 
 ## 1. Role
 
-You are an expert software architect specialising in LOCS v1.4.
+You are an expert software architect specialising in LOCS v2.0.
 
 Generate only:
 
@@ -211,18 +217,33 @@ Generate only:
 - local registry is default
 - shared registry is optional
 - token metrics must record the backend used
+- stability follows the v2 lifecycle: draft → active → stabilising → stable → protected → frozen
 
 ---
 
-## 3. Validation Expectations
+## 3. Stability Levels (v2)
 
-- Python modules should satisfy built-in `ast` checks.
-- JavaScript/TypeScript modules should satisfy Tree-sitter checks when the optional AST extras are installed.
+| Level | Meaning |
+|---|---|
+| `draft` | Work in progress, no guarantees |
+| `active` | In use, may still change |
+| `stabilising` | Hardening toward stable; breaking changes need review |
+| `stable` | Production-ready, breaking changes require evidence |
+| `protected` | Frozen API surface; edits require evidence + approval |
+| `frozen` | Immutable; no LLM edits permitted without explicit unlock |
+
+---
+
+## 4. Validation Expectations
+
+- Python modules satisfy built-in `ast` checks (exact).
+- JS/TS modules satisfy Tree-sitter checks when extras are installed; otherwise regex fallback.
+- `locs validate` reports the AST backend and token backend used so you know confidence level.
 - If exact tokenizer support is available, use it instead of heuristic counting.
 
 ---
 
-## 4. Workflow
+## 5. Workflow
 
 1. `locs new <id>`
 2. implement the module
@@ -234,7 +255,7 @@ Generate only:
 """
 
 _INIT_SESSION_INIT_MD = """\
-# LOCS Session Init (v1.4)
+# LOCS Session Init (v2.0)
 
 Paste this file into an LLM session to activate LOCS governance.
 
@@ -251,15 +272,20 @@ locs new <id>
 # 3. Score and validate
 locs score <file> --write
 locs validate <file>
+# validate prints AST backend and token backend so you know validation confidence
 
 # 4. Register locally by default
 locs register <file>
+# registration updates .locs.index.json for fast bootstrap
 
 # 5. Optional shared publication
 locs register <file> --scope shared
 
-# 6. Bootstrap compact context
+# 6. Bootstrap compact context (uses index when available)
 locs bootstrap --category <slug> --limit 5
+
+# 7. Rebuild index if needed
+locs index rebuild
 ```
 
 ---
@@ -268,9 +294,10 @@ locs bootstrap --category <slug> --limit 5
 
 - Prefer local registry routing first.
 - Use shared registry only when cross-project reuse matters.
-- Treat token metrics as backend-specific.
-- Trust AST-backed validation over regex fallback when available.
+- Treat token metrics as backend-specific — only compare counts from the same backend family.
+- Trust AST-backed validation (exact) over regex fallback; check the confidence line in validate output.
 - Load implementations only after registry and metadata routing.
+- Stability follows the v2 lifecycle: draft → active → stabilising → stable → protected → frozen.
 """
 
 _INIT_PRE_COMMIT = """\
@@ -288,7 +315,7 @@ STAGED=$(git diff --cached --name-only --diff-filter=ACM)
 LOCS_FILES=()
 for f in $STAGED; do
   [[ -f "$f" ]] || continue
-  if grep -q "@locs-version" "$f" 2>/dev/null; then
+  if grep -qE "(@locs-version|locs-version:)" "$f" 2>/dev/null; then
     LOCS_FILES+=("$f")
   fi
 done
@@ -317,13 +344,15 @@ _INIT_CLAUDE_MD_SECTION = """\
 
 ## LOCS — LLM-Optimised Capability Specification
 
-This project uses LOCS v1.4. When writing or editing source files:
+This project uses LOCS v2.0. When writing or editing source files:
 
 - Load `LOCS_SKILL.md` for generation rules before creating any module
 - Load `LOCS_SESSION_INIT.md` to activate the session workflow
 - Use `locs validate <file>` before registering any module
 - Use `locs new <id>` to scaffold new capability files
 - Use `locs bootstrap --limit 5` to load compact routing context
+
+Stability levels: draft → active → stabilising → stable → protected → frozen
 
 Run `locs status` to see the current registry.
 """
@@ -1183,6 +1212,24 @@ def cmd_new(args):
             "impl": "// CORE IMPLEMENTATION\nfunc {fn_name}(params any) any {\n\treturn nil\n}",
             "example": "// EXAMPLE USAGE\n// {fn_name}(...)",
         },
+        ".rb": {
+            "interface": "# PUBLIC INTERFACE\n# def {fn_name}(params)\n# end",
+            "contract": "# BEHAVIOUR CONTRACT\n# - Pure function",
+            "impl": "# CORE IMPLEMENTATION\ndef {fn_name}(params)\n  nil\nend",
+            "example": "# EXAMPLE USAGE\n# {fn_name}(...)",
+        },
+        ".sh": {
+            "interface": "# PUBLIC INTERFACE\n# {fn_name}() - pure function",
+            "contract": "# BEHAVIOUR CONTRACT\n# - Pure function",
+            "impl": "# CORE IMPLEMENTATION\n{fn_name}() {{\n  :\n}}",
+            "example": "# EXAMPLE USAGE\n# {fn_name} ...",
+        },
+        ".lua": {
+            "interface": "-- PUBLIC INTERFACE\n-- local function {fn_name}(params) end",
+            "contract": "-- BEHAVIOUR CONTRACT\n-- Pure function",
+            "impl": "-- CORE IMPLEMENTATION\nlocal function {fn_name}(params)\n  return nil\nend",
+            "example": "-- EXAMPLE USAGE\n-- {fn_name}(...)",
+        },
     }
     stub = stubs.get(ext, stubs[".ts"])
     fn_name = "".join(word if index == 0 else word.capitalize() for index, word in enumerate(re.split(r"[-_]", verb_noun)))
@@ -1264,6 +1311,60 @@ def cmd_score(args):
         print(f"  updated metadata in {path.name}")
 
 
+def _validation_confidence(path: Path, meta: dict[str, str]) -> dict[str, str]:
+    """Return confidence metadata about which backends were used for validation."""
+    # Determine AST backend that would be used
+    if path.suffix == ".py":
+        ast_backend = "python-ast (exact)"
+        ast_exact = True
+    elif path.suffix in {".js", ".ts"}:
+        try:
+            from tree_sitter import Parser  # type: ignore  # noqa: F401
+            language, backend_label = _load_tree_sitter_language(path)
+            if language is not None:
+                ast_backend = f"{backend_label} (exact)"
+                ast_exact = True
+            else:
+                ast_backend = "regex-fallback (degraded — install tree-sitter for exact checks)"
+                ast_exact = False
+        except ImportError:
+            ast_backend = "regex-fallback (degraded — install tree-sitter for exact checks)"
+            ast_exact = False
+    else:
+        ast_backend = f"not supported for {path.suffix} (no checks performed)"
+        ast_exact = False
+
+    # Determine token backend from recorded metadata
+    token_backend_raw = parse_metric_value(meta.get("token-metrics", ""), "tokenizer-backend")
+    if not token_backend_raw or token_backend_raw == "heuristic":
+        token_backend = "heuristic (degraded — run `locs score --write` with an exact backend)"
+        token_exact = False
+    else:
+        token_backend = f"{token_backend_raw} (exact)"
+        token_exact = True
+
+    # Declared inputs coverage
+    declared_inputs = extract_declared_inputs(meta)
+    text = path.read_text(encoding="utf-8")
+    if declared_inputs and path.suffix == ".py" and ast_exact:
+        ast_result = inspect_python_ast(path, text, declared_inputs, "")
+        found = len(ast_result.declared_inputs_found)
+        total = len(declared_inputs)
+        coverage = f"{found}/{total} declared inputs verified by AST"
+    elif declared_inputs:
+        coverage = f"{len(declared_inputs)} declared inputs (regex checks only)"
+    else:
+        coverage = "no declared inputs"
+
+    return {
+        "ast_backend": ast_backend,
+        "ast_exact": ast_exact,
+        "token_backend": token_backend,
+        "token_exact": token_exact,
+        "coverage": coverage,
+    }
+
+
 def cmd_validate(args):
     path = Path(args.file)
     if not path.exists():
@@ -1272,13 +1373,24 @@ def cmd_validate(args):
     meta = parse_metadata(path)
     registry = resolve_registry(path, args.scope, args.registry)
     failures = validate_module(path, meta, registry if registry.exists() else None)
+    score, grade = compute_score(meta)
+    confidence = _validation_confidence(path, meta)
+
     if failures:
         print(f"FAIL  {path.name}  ({len(failures)} issue(s))")
         for failure in failures:
             print(f"  - {failure}")
+        print()
+        print("Validation confidence:")
+        print(f"  AST backend:   {confidence['ast_backend']}")
+        print(f"  Token backend: {confidence['token_backend']}")
+        print(f"  Coverage:      {confidence['coverage']}")
         sys.exit(1)
-    score, grade = compute_score(meta)
+
     print(f"PASS  {path.name}  (grade {grade})")
+    print(f"  AST backend:   {confidence['ast_backend']}")
+    print(f"  Token backend: {confidence['token_backend']}")
+    print(f"  Coverage:      {confidence['coverage']}")
 
 
 def cmd_register(args):
@@ -1316,7 +1428,118 @@ def cmd_register(args):
     registry_root = registry.parent.resolve()
     file_path = str(path.resolve()) if registry.name == SHARED_REGISTRY_FILE else str(path.resolve().relative_to(registry_root))
     append_registry_row(registry, meta, file_path)
+    _update_registry_index(registry, meta, file_path)
     print(f"registered  {module_id}")
+
+
+def _index_path(registry: Path) -> Path:
+    return registry.parent / LOCAL_INDEX_FILE
+
+
+def _load_registry_index(registry: Path) -> dict:
+    idx_path = _index_path(registry)
+    if idx_path.exists():
+        try:
+            return json.loads(idx_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _update_registry_index(registry: Path, meta: dict[str, str], file_path: str) -> None:
+    idx = _load_registry_index(registry)
+    module_id = meta.get("module-id", "")
+    if not module_id:
+        return
+
+    idx.setdefault("version", "2.0")
+    idx["generated_at"] = datetime.now(timezone.utc).isoformat()
+    idx.setdefault("by_category", {})
+    idx.setdefault("by_domain", {})
+    idx.setdefault("by_module_id", {})
+
+    category = meta.get("category", "")
+    domain = meta.get("domain", "")
+
+    if category:
+        idx["by_category"].setdefault(category, [])
+        if module_id not in idx["by_category"][category]:
+            idx["by_category"][category].append(module_id)
+
+    if domain:
+        idx["by_domain"].setdefault(domain, [])
+        if module_id not in idx["by_domain"][domain]:
+            idx["by_domain"][domain].append(module_id)
+
+    idx["by_module_id"][module_id] = {
+        "module-name": meta.get("module-name", ""),
+        "category": category,
+        "domain": domain,
+        "primary-capability": meta.get("primary-capability", ""),
+        "signature": meta.get("capability", "").split(".")[0].strip(),
+        "version": meta.get("version", "1.0.0"),
+        "stability": meta.get("stability", "active"),
+        "file-path": file_path,
+        "capability-score": meta.get("capability-score", ""),
+    }
+
+    _index_path(registry).write_text(json.dumps(idx, indent=2), encoding="utf-8")
+
+
+def _rebuild_registry_index(registry: Path) -> int:
+    modules, _ = extract_registry_data(registry)
+    idx_path = _index_path(registry)
+    idx: dict = {"version": "2.0", "generated_at": datetime.now(timezone.utc).isoformat(),
+                 "by_category": {}, "by_domain": {}, "by_module_id": {}}
+
+    for module_id, row in modules.items():
+        category = row.get("category", "")
+        domain = row.get("domain", "")
+        if category:
+            idx["by_category"].setdefault(category, [])
+            if module_id not in idx["by_category"][category]:
+                idx["by_category"][category].append(module_id)
+        if domain:
+            idx["by_domain"].setdefault(domain, [])
+            if module_id not in idx["by_domain"][domain]:
+                idx["by_domain"][domain].append(module_id)
+        idx["by_module_id"][module_id] = {
+            "module-name": row.get("module-name", ""),
+            "category": category,
+            "domain": domain,
+            "primary-capability": row.get("primary-capability", ""),
+            "signature": row.get("signature", ""),
+            "version": row.get("version", "1.0.0"),
+            "stability": row.get("stability", "active"),
+            "file-path": row.get("file-path", ""),
+            "capability-score": row.get("capability-score", ""),
+        }
+
+    idx_path.write_text(json.dumps(idx, indent=2), encoding="utf-8")
+    return len(modules)
+
+
+def cmd_index(args):
+    registry = resolve_registry(Path.cwd(), args.scope, args.registry)
+    if not registry.exists():
+        print("ERROR: registry not found")
+        sys.exit(1)
+
+    if args.index_command == "rebuild":
+        count = _rebuild_registry_index(registry)
+        print(f"index rebuilt  {count} module(s)  →  {_index_path(registry)}")
+    else:
+        idx = _load_registry_index(registry)
+        if not idx:
+            print("no index found — run `locs index rebuild` to create one")
+            return
+        module_count = len(idx.get("by_module_id", {}))
+        category_count = len(idx.get("by_category", {}))
+        generated = idx.get("generated_at", "unknown")
+        print(f"LOCS Index — {_index_path(registry)}")
+        print(f"  modules:    {module_count}")
+        print(f"  categories: {category_count}")
+        print(f"  generated:  {generated}")
 
 
 def cmd_status(args):
@@ -1346,18 +1569,42 @@ def cmd_bootstrap(args):
         print("ERROR: registry not found")
         sys.exit(1)
 
-    module_map, graph = extract_registry_data(registry)
-    modules = list(module_map.values())
-    if args.category:
-        modules = [module for module in modules if module.get("category") == args.category]
-    if args.domain:
-        modules = [module for module in modules if module.get("domain") == args.domain]
-    if args.primary:
-        modules = [module for module in modules if module.get("primary-capability") == args.primary]
+    # Use index for fast category/domain lookup when available
+    idx = _load_registry_index(registry)
+    used_index = False
+    if idx and idx.get("by_module_id") and (args.category or args.domain):
+        candidate_ids: set[str] | None = None
+        if args.category:
+            cat_ids = set(idx.get("by_category", {}).get(args.category, []))
+            candidate_ids = cat_ids if candidate_ids is None else candidate_ids & cat_ids
+        if args.domain:
+            dom_ids = set(idx.get("by_domain", {}).get(args.domain, []))
+            candidate_ids = dom_ids if candidate_ids is None else candidate_ids & dom_ids
+        if candidate_ids is not None:
+            modules = [
+                m for mid, m in idx["by_module_id"].items()
+                if mid in candidate_ids
+                and (not args.primary or m.get("primary-capability") == args.primary)
+            ]
+            used_index = True
+
+    if not used_index:
+        module_map, graph = extract_registry_data(registry)
+        modules = list(module_map.values())
+        if args.category:
+            modules = [m for m in modules if m.get("category") == args.category]
+        if args.domain:
+            modules = [m for m in modules if m.get("domain") == args.domain]
+        if args.primary:
+            modules = [m for m in modules if m.get("primary-capability") == args.primary]
+        graph = graph
+    else:
+        _, graph = extract_registry_data(registry)
 
     def sort_key(module: dict[str, str]) -> tuple[Any, ...]:
         score, _ = parse_capability_score({"capability-score": module.get("capability-score", "")})
-        return (-(score or 0.0), compute_dependency_depth(module["module-id"], graph), module["module-id"])
+        mid = module.get("module-id", list(idx.get("by_module_id", {}).keys())[0] if idx else "")
+        return (-(score or 0.0), compute_dependency_depth(mid, graph), mid)
 
     modules = sorted(modules, key=sort_key)[:args.limit]
 
@@ -1407,7 +1654,7 @@ def _scan_project_for_init(root: Path) -> dict:
         if ext in _INIT_SOURCE_EXTS:
             try:
                 snippet = path.read_text(encoding="utf-8", errors="ignore")[:512]
-                if "@locs-version" in snippet:
+                if "@locs-version" in snippet or "locs-version:" in snippet:
                     locs_count += 1
             except Exception:
                 pass
@@ -1672,7 +1919,7 @@ def cmd_init(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="locs", description="LOCS CLI v1.4")
+    parser = argparse.ArgumentParser(prog="locs", description="LOCS CLI v2.0")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_new = sub.add_parser("new", help="Scaffold module")
@@ -1712,6 +1959,12 @@ def main():
     p_boot.add_argument("--registry")
     p_boot.add_argument("--scope", choices=["auto", "local", "shared"], default="auto")
 
+    p_idx = sub.add_parser("index", help="Manage the registry index")
+    p_idx.add_argument("index_command", choices=["rebuild", "status"], nargs="?", default="status",
+                       metavar="COMMAND", help="rebuild | status (default: status)")
+    p_idx.add_argument("--registry")
+    p_idx.add_argument("--scope", choices=["auto", "local", "shared"], default="auto")
+
     p_init = sub.add_parser("init", help="Initialise LOCS governance in a project")
     p_init.add_argument("directory", nargs="?", default=None, metavar="DIR",
                         help="Target project directory (default: current directory)")
@@ -1734,6 +1987,7 @@ def main():
         "register": cmd_register,
         "status": cmd_status,
         "bootstrap": cmd_bootstrap,
+        "index": cmd_index,
         "init": cmd_init,
     }[args.command](args)
 

@@ -9,5 +9,11 @@ LOCS (Library of Capabilities and Signatures) provides a formal, machine-readabl
 - **Stability-Aware**: Code and documentation have a lifecycle. Governance rigor increases as a component matures.
 - **Language Agnostic**: The contract format (LOCS metadata) should be consistent across Python, Rust, TypeScript, and Go.
 
-## 3. Governance via Guarding
-In LOCS v2, metadata includes `guard` instructions that define how the target may be edited. This enables a "Guard-First" development flow where the user defines boundaries, and the system enforces them.
+## 4. Section-Based Addressing and Governance
+While AST parsing provides fine-grained control over code, documentation and logical code regions require a more flexible, stable addressing mechanism.
+
+- **Stable Anchors**: Section IDs provide refactoring-resilient targets for governance and retrieval.
+- **Sparse Metadata**: Governance should be "sparse" — applied only at significant boundaries to minimize noise and token bloat.
+- **Unified Schema**: Whether in Markdown or Code, the metadata schema remains consistent (`id`, `edit`, `role`).
+- **Low-Friction Inference**: "Ghost Inference" uses project conventions to provide high-quality defaults without manual annotation.
+- **Sidecar Governance**: Shadow policies allow governing legacy or third-party code without source modification.

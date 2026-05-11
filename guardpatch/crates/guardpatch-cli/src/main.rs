@@ -50,6 +50,8 @@ enum Commands {
     },
     /// Show the audit log.
     Audit {
+        #[command(subcommand)]
+        sub: Option<AuditCommands>,
         #[arg(long, default_value = "20")]
         limit: usize,
         #[arg(long)]
@@ -80,6 +82,16 @@ enum Commands {
     Relock {
         target: String,
     },
+    /// Seal a file by adding deterministic IDs to sections lacking them.
+    Seal { 
+        path: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Unseal a file by removing all locs:id anchors.
+    Unseal {
+        path: PathBuf,
+    },
     /// Manage the review queue.
     Review {
         #[command(subcommand)]
@@ -91,6 +103,19 @@ enum Commands {
         limit: usize,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCommands {
+    /// Archive the current audit log and start fresh.
+    Rotate {
+        /// Archive when entry count exceeds this value (default: 10000).
+        #[arg(long, default_value = "10000")]
+        max_entries: usize,
+        /// Rotate unconditionally regardless of entry count.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -230,27 +255,43 @@ fn main() -> anyhow::Result<()> {
             println!("Risk score: {}/100", score);
         }
 
-        Commands::Audit { limit, report } => {
-            let recent = audit_store.load_recent(limit)?;
-            if report {
-                println!("=== GuardPatch Audit Report ===");
-                println!("{:<20} {:<15} {}", "Timestamp", "Decision", "Summary");
-                println!("{}", "-".repeat(80));
-                for r in &recent {
-                    println!(
-                        "{:<20} {:<15} {}",
-                        r.timestamp.format("%Y-%m-%dT%H:%M:%S"),
-                        format!("{:?}", r.decision).chars().take(15).collect::<String>(),
-                        r.summary
-                    );
+        Commands::Audit { sub, limit, report } => {
+            if let Some(AuditCommands::Rotate { max_entries, force }) = sub {
+                let effective_max = if force { 0 } else { max_entries };
+                match audit_store.rotate(effective_max)? {
+                    Some(archive_path) => {
+                        println!("Audit log rotated → {:?}", archive_path);
+                        println!("A fresh audit log will be created on the next verification.");
+                    }
+                    None => {
+                        println!(
+                            "Rotation skipped: log has fewer than {} entries. Use --force to rotate unconditionally.",
+                            max_entries
+                        );
+                    }
                 }
-                println!("{}", "-".repeat(80));
-                let rejected = recent.iter().filter(|r| matches!(r.decision, Decision::Rejected(_))).count();
-                let allowed = recent.iter().filter(|r| matches!(r.decision, Decision::Allowed)).count();
-                println!("Allowed: {}  Rejected: {}  Total: {}", allowed, rejected, recent.len());
             } else {
-                for r in recent {
-                    println!("[{}] {:?} - {}", r.timestamp.format("%Y-%m-%dT%H:%M:%S"), r.decision, r.summary);
+                let recent = audit_store.load_recent(limit)?;
+                if report {
+                    println!("=== GuardPatch Audit Report ===");
+                    println!("{:<20} {:<15} {}", "Timestamp", "Decision", "Summary");
+                    println!("{}", "-".repeat(80));
+                    for r in &recent {
+                        println!(
+                            "{:<20} {:<15} {}",
+                            r.timestamp.format("%Y-%m-%dT%H:%M:%S"),
+                            format!("{:?}", r.decision).chars().take(15).collect::<String>(),
+                            r.summary
+                        );
+                    }
+                    println!("{}", "-".repeat(80));
+                    let rejected = recent.iter().filter(|r| matches!(r.decision, Decision::Rejected(_))).count();
+                    let allowed = recent.iter().filter(|r| matches!(r.decision, Decision::Allowed)).count();
+                    println!("Allowed: {}  Rejected: {}  Total: {}", allowed, rejected, recent.len());
+                } else {
+                    for r in recent {
+                        println!("[{}] {:?} - {}", r.timestamp.format("%Y-%m-%dT%H:%M:%S"), r.decision, r.summary);
+                    }
                 }
             }
         }
@@ -305,6 +346,55 @@ fn main() -> anyhow::Result<()> {
             let count = registry.relock(&target);
             registry.save()?;
             println!("Relocked '{}' ({} unlock(s) removed).", target, count);
+        }
+
+        Commands::Seal { path, dry_run } => {
+            let content = fs::read_to_string(&path)?;
+            let mut count = 0;
+            let mut result = String::new();
+            let mut last_pos = 0;
+
+            // Simple regex for ATX headings
+            let re_heading = regex::Regex::new(r"(?m)^(#{1,6}\s+.*)$")?;
+            let re_has_id = regex::Regex::new(r"<!--\s*locs:id=[^\s>]+\s*-->")?;
+
+            for cap in re_heading.captures_iter(&content) {
+                let m = cap.get(1).unwrap();
+                let heading_line = m.as_str();
+                
+                if !re_has_id.is_match(heading_line) {
+                    count += 1;
+                    let id = format!("s{:04x}", fxhash::hash64(heading_line) & 0xFFFF);
+                    let sealed_heading = format!("{} <!-- locs:id={} -->", heading_line, id);
+                    
+                    result.push_str(&content[last_pos..m.start()]);
+                    result.push_str(&sealed_heading);
+                    last_pos = m.end();
+                }
+            }
+            result.push_str(&content[last_pos..]);
+
+            if dry_run {
+                println!("Dry run: would seal {} headings in {:?}.", count, path);
+            } else if count > 0 {
+                fs::write(&path, result)?;
+                println!("Sealed {} headings in {:?}.", count, path);
+            } else {
+                println!("No headings to seal in {:?}.", path);
+            }
+        }
+
+        Commands::Unseal { path } => {
+            let content = fs::read_to_string(&path)?;
+            let re_id = regex::Regex::new(r"\s*<!--\s*locs:id=[^\s>]+\s*-->")?;
+            let result = re_id.replace_all(&content, "");
+            
+            if result != content {
+                fs::write(&path, result.to_string())?;
+                println!("Unsealed {:?}.", path);
+            } else {
+                println!("No locs:id anchors found in {:?}.", path);
+            }
         }
 
         Commands::Ledger { limit, json } => {
@@ -448,6 +538,20 @@ project:
   name: my-project
   mode: editable
   locs_required_for_new_files: false
+
+# Ghost Inference: Infer roles from paths
+role_inference:
+  - pattern: "tests/**"
+    role: example
+  - pattern: "docs/design/**"
+    role: contract
+
+# Evidence Mapping: Link roles to commands
+evidence_map:
+  - role: contract
+    commands: ["cargo test", "cargo clippy"]
+  - role: implementation
+    commands: ["cargo test"]
 
 paths: []
 

@@ -176,6 +176,14 @@ guardpatch promote src/core/risk.ts --to protected --evidence tests,user_approva
 
 Evidence checks run automatically (`cargo test`, `npm test`, `pytest`, `tsc --noEmit`, `cargo check` — auto-detected by project type). A file cannot be promoted unless the checks pass.
 
+**Mandatory evidence floor:** promoting to `protected` or `frozen` always requires at least one evidence item, regardless of `.guardpatch.yml` configuration. This is a hard constraint, not an opt-in. Attempting to promote without evidence will fail:
+
+```
+Error: Promoting 'src/core/risk.ts' to Protected requires at least one evidence item
+       (e.g. --evidence tests,typecheck or --evidence user_approval).
+       These stability levels enforce an immutable audit trail.
+```
+
 ### The unlock workflow
 
 Protected does not mean permanently immutable. It means: *this cannot be casually changed by an AI agent without an explicit unlock*.
@@ -244,9 +252,50 @@ guardpatch ledger           # table view
 guardpatch ledger --json    # machine-readable
 ```
 
+### Audit log rotation
+
+The audit log (`.guardpatch/audit.jsonl`) grows unboundedly. Rotate it to archive the current file and start fresh:
+
+```bash
+# Rotate when log exceeds 10 000 entries (default)
+guardpatch audit rotate
+
+# Rotate when log exceeds a custom threshold
+guardpatch audit rotate --max-entries 5000
+
+# Rotate unconditionally regardless of size
+guardpatch audit rotate --force
+```
+
+Rotation archives the current log to `.guardpatch/audit.YYYY-MM-DD.jsonl` (with a numeric suffix if that name is already taken) and starts a fresh log on the next verification. The archive is a plain JSONL file and can be inspected with standard tools.
+
 ### Patch risk scoring
 
 Every patch receives a deterministic risk score (0–100) based on files changed, lines changed, and protected symbols touched. The score is available via `guardpatch explain patch.diff` and is recorded in the ledger.
+
+### Structured rejection output
+
+Every rejected or review-required decision includes a machine-readable fix hint and the rule source so developers and agent frameworks know exactly what to do next:
+
+```
+--- GuardPatch Report ---
+Status:   Rejected("Target is protected (mode=Protected): \"src/auth/login.ts\"")
+Summary:  Patch rejected: Target is protected (mode=Protected): "src/auth/login.ts"
+Fix:      Run: guardpatch unlock src/auth/login.ts --reason "<reason>" --scope one_patch
+Rule:     path protection rule (.guardpatch.yml paths[])
+Files:    ["src/auth/login.ts"]
+Lines:    2
+-------------------------
+```
+
+The `Fix:` line is a ready-to-run command. The `Rule:` line identifies the exact policy that triggered the decision. Both fields are also present in the JSON output (`--json`):
+
+```json
+{
+  "fix_hint": "Run: guardpatch unlock src/auth/login.ts --reason \"<reason>\" --scope one_patch",
+  "rule_source": "path protection rule (.guardpatch.yml paths[])"
+}
+```
 
 ### LLM tool adapter
 
@@ -325,6 +374,9 @@ echo '{"operations":[...]}' | guardpatch verify --stdin-json
 
 # Show recent audit log
 guardpatch audit --report
+
+# Rotate audit log (archive when > 10 000 entries)
+guardpatch audit rotate
 
 # Show applied-patch ledger
 guardpatch ledger
@@ -423,7 +475,7 @@ cd guardpatch
 cargo test
 ```
 
-33 tests across all crates covering:
+41 tests across all crates covering:
 
 - Protected path rejection and unlock degradation
 - Symbol locking and signature-only locking
@@ -440,3 +492,4 @@ cargo test
 - LOCS metadata line-range detection (frontmatter + block comment)
 - Inline Markdown policy parsing (`<!-- guardpatch-locked/editable: ... -->`)
 - GuardConfig region-field YAML round-trip
+- Mandatory evidence floor for Protected and Frozen states

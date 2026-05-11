@@ -1,4 +1,4 @@
-# LOCS - LLM-Optimised Capability Specification (v1.4)
+# LOCS - LLM-Optimised Capability Specification (v2.0)
 
 **LOCS** is a portable framework for writing code that LLMs can reliably read, retrieve, compose, and govern. It transforms a standard codebase into a machine-readable capability marketplace.
 
@@ -28,11 +28,34 @@ LOCS addresses that by turning source files into self-describing capability unit
 
 ---
 
+## Stability Lifecycle
+
+Modules progress through a linear stability chain:
+
+```
+draft → active → stabilising → stable → protected → frozen
+```
+
+| Level | Meaning |
+|---|---|
+| `draft` | Work in progress, no guarantees |
+| `active` | In use, may still change |
+| `stabilising` | Hardening toward stable; breaking changes need review |
+| `stable` | Production-ready, breaking changes require evidence |
+| `protected` | Frozen API surface; edits require evidence + approval |
+| `frozen` | Immutable; no LLM edits permitted without an explicit unlock |
+
+`protected` and `frozen` map directly to GuardPatch enforcement — files at these levels cannot be edited by an AI agent without an explicit `guardpatch unlock`.
+
+---
+
 ## Registry Model
 
 `LOCS_REGISTRY.md` is the default project-local registry.
 
 `LOCS_GRAND_REGISTRY.md` is optional and exists for cross-project sharing. Use it only when shared capability reuse is worth the larger search surface.
+
+A `.locs.index.json` sidecar is maintained automatically by `locs register` for fast O(1) category and domain lookups. Run `locs index rebuild` to regenerate it from the registry table.
 
 ---
 
@@ -47,10 +70,19 @@ LOCS addresses that by turning source files into self-describing capability unit
 - dependency existence
 - circular dependency detection
 - dependency-depth validation
-- Python AST-based signature and side-effect checks
-- JavaScript/TypeScript AST-based checks when Tree-sitter extras are installed
+- Python AST-based signature and side-effect checks (exact)
+- JavaScript/TypeScript AST-based checks when Tree-sitter extras are installed (exact)
 
-If AST-capable backends are unavailable, LOCS falls back to deterministic regex checks instead of failing hard.
+Validation output includes a confidence report showing which AST and token backends were used:
+
+```
+PASS  my_module.py  (grade B)
+  AST backend:   python-ast (exact)
+  Token backend: tiktoken:cl100k_base (exact)
+  Coverage:      5/5 declared inputs verified by AST
+```
+
+If Tree-sitter is unavailable, the report marks the backend as `regex-fallback (degraded)` so you always know your validation confidence level.
 
 ---
 
@@ -63,7 +95,17 @@ Token counts are backend-specific.
 - `sentencepiece` for SentencePiece model files
 - heuristic fallback when no exact backend is available
 
-LOCS records the backend in `@token-metrics` so counts remain auditable.
+LOCS records the backend in `@token-metrics` so counts remain auditable. Only compare token counts from the same backend family.
+
+---
+
+## Supported Languages
+
+LOCS metadata headers work in: TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, Ruby, Shell, Lua, PHP.
+
+For Ruby: use `=begin` / `=end` block comments.
+For Shell: use `# BEGIN_LOCS` / `# END_LOCS` markers.
+For languages not listed: the default C-style `/* ... */` block is used as fallback.
 
 ---
 
@@ -155,17 +197,21 @@ locs score graph_smart_port_selector.py --write --tokenizer transformers --model
 # Force SentencePiece counting from a local model file
 locs score graph_smart_port_selector.py --write --tokenizer sentencepiece --tokenizer-resource .\gemini.model
 
-# Validate
+# Validate (prints AST and token backend confidence)
 locs validate graph_smart_port_selector.py
 
-# Register locally
+# Register locally (also updates .locs.index.json)
 locs register graph_smart_port_selector.py
 
 # Optional shared publication
 locs register graph_smart_port_selector.py --scope shared
 
-# Bootstrap compact routing context
+# Bootstrap compact routing context (uses index when available)
 locs bootstrap --category graph --limit 5
+
+# Registry index management
+locs index status
+locs index rebuild
 ```
 
 ---
@@ -174,6 +220,7 @@ locs bootstrap --category graph --limit 5
 
 - `locs.py`: CLI engine
 - `LOCS_REGISTRY.md`: default local registry
+- `.locs.index.json`: fast-lookup index (auto-maintained by `locs register`)
 - `LOCS_GRAND_REGISTRY.md`: optional shared registry
 - `LOCS_SKILL.md`: generation rules
 - `LOCS_SESSION_INIT.md`: LLM bootstrap file
@@ -185,5 +232,7 @@ locs bootstrap --category graph --limit 5
 ## Notes
 
 - Token counts should only be compared directly when they come from the same backend family.
-- Python AST analysis uses the built-in `ast` module.
-- JavaScript/TypeScript AST analysis uses optional Tree-sitter backends when installed.
+- `locs validate` always reports which AST and token backends were used — check the confidence line.
+- Python AST analysis uses the built-in `ast` module (always exact).
+- JavaScript/TypeScript AST analysis uses optional Tree-sitter backends when installed; falls back to regex otherwise.
+- Stability levels map directly to GuardPatch guard modes: `protected` → `mode: protected`, `frozen` → `mode: frozen`.

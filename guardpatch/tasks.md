@@ -107,3 +107,17 @@ Dependencies: Phase 2 (LOCS schema), Phase 3 (AST parsing), Phase 4 (evidence ru
       - `test_guard_config_region_fields_round_trip` (guardpatch-locs)
       - `test_parse_inline_policy_locked_and_editable` (guardpatch-parse)
       - `test_parse_inline_policy_empty` (guardpatch-parse)
+- [x] 6.14 Implement LOCS Section Addressing (Stable IDs, inline modes, and roles)
+      - Updated `DocumentSection` and `MarkerRange` with `id`, `mode`, and `role`
+      - Implemented regex-based anchor parsing for Markdown and Code
+      - Integrated Section Addressing into `Verifier::verify_patch`
+      - Updated classification to respect explicit `role` fields
+
+## Phase 7 — Advanced Governance & Low-Friction Workflows [DONE]
+
+- [x] 7.1 Implement "Ghost Inference" (Path-based role mapping)
+- [x] 7.2 Implement "Shadow Policy" (Sidecar config loading)
+- [x] 7.3 Implement "Evidence Mapping" (Linking roles to commands)
+- [x] 7.4 Implement "Self-Stabilizing Headers" (`guardpatch seal` and `guardpatch unseal`)
+- [x] 7.5 Implement "Policy Integrity" (Gating modification of `.guardpatch.yml`)
+- [x] 7.6 Phase 7 unit tests (Policy integrity, Ghost inference)

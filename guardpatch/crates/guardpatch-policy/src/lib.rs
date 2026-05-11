@@ -17,6 +17,16 @@ pub enum GuardMode {
     Deprecated,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SectionRole {
+    Metadata,
+    Contract,
+    Implementation,
+    Example,
+    Notes,
+}
+
 impl Default for GuardMode {
     fn default() -> Self {
         GuardMode::Editable
@@ -136,15 +146,65 @@ pub struct Config {
     pub promotion: PromotionConfig,
     #[serde(default)]
     pub unlock_policy: UnlockPolicy,
+    /// Path-based role inference rules (e.g. "tests/**" -> "example").
+    #[serde(default)]
+    pub role_inference: Vec<RoleInferenceRule>,
+    /// Map roles to required evidence commands.
+    #[serde(default)]
+    pub evidence_map: Vec<EvidenceMapRule>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RoleInferenceRule {
+    pub pattern: String,
+    pub role: SectionRole,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EvidenceMapRule {
+    pub role: SectionRole,
+    pub commands: Vec<String>,
 }
 
 impl Config {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
-        let config: Config = serde_yaml::from_str(&content)
+        let mut config: Config = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse config YAML: {:?}", path.as_ref()))?;
+        
+        // Load sidecar if exists
+        let sidecar_path = path.as_ref().with_extension("sidecar.yml");
+        if sidecar_path.exists() {
+            let sidecar_content = fs::read_to_string(&sidecar_path)?;
+            let sidecar: Config = serde_yaml::from_str(&sidecar_content)?;
+            config.merge(sidecar);
+        }
+
         Ok(config)
+    }
+
+    pub fn merge(&mut self, other: Config) {
+        self.paths.extend(other.paths);
+        self.lock_sections.extend(other.lock_sections);
+        self.editable_sections.extend(other.editable_sections);
+        self.lock_symbols.extend(other.lock_symbols);
+        self.lock_signatures.extend(other.lock_signatures);
+        self.agents.extend(other.agents);
+        self.role_inference.extend(other.role_inference);
+        self.evidence_map.extend(other.evidence_map);
+    }
+
+    pub fn infer_role<P: AsRef<Path>>(&self, path: P) -> Option<SectionRole> {
+        let path = path.as_ref();
+        for rule in &self.role_inference {
+            if let Ok(pattern) = glob::Pattern::new(&rule.pattern) {
+                if pattern.matches_path(path) {
+                    return Some(rule.role.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn find_and_load() -> anyhow::Result<Option<Self>> {

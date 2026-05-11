@@ -34,3 +34,5 @@ pulldown-cmark = "0.11"
 similar = "2.5"
 patch = "0.7"
 uuid = { version = "1.8", features = ["v4", "serde"] }
+regex = "1.10"
+fxhash = "0.2"

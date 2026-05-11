@@ -16,3 +16,5 @@ guardpatch-patch = { path = "../guardpatch-patch" }
 guardpatch-audit = { path = "../guardpatch-audit" }
 guardpatch-lifecycle = { path = "../guardpatch-lifecycle" }
 chrono = { workspace = true }
+regex = { workspace = true }
+fxhash = { workspace = true }

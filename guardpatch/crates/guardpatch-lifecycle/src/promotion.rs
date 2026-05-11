@@ -87,6 +87,17 @@ impl PromotionStore {
         actor: String,
         evidence: Vec<String>,
     ) -> anyhow::Result<()> {
+        // Enforce mandatory evidence floor for high-stability states.
+        // Protected and Frozen cannot be reached without at least one evidence item.
+        if matches!(to, PromotionState::Protected | PromotionState::Frozen) && evidence.is_empty() {
+            anyhow::bail!(
+                "Promoting '{}' to {:?} requires at least one evidence item \
+                 (e.g. --evidence tests,typecheck or --evidence user_approval). \
+                 These stability levels enforce an immutable audit trail.",
+                target, to
+            );
+        }
+
         let entry = self.entries.entry(target.to_string()).or_insert_with(|| PromotionRecord {
             target: target.to_string(),
             state: PromotionState::Draft,
@@ -165,5 +176,34 @@ mod tests {
         assert!(PromotionState::Draft.priority() < PromotionState::Active.priority());
         assert!(PromotionState::Stable.priority() < PromotionState::Protected.priority());
         assert!(PromotionState::Protected.priority() < PromotionState::Frozen.priority());
+    }
+
+    #[test]
+    fn test_promote_to_protected_requires_evidence() {
+        let mut store = PromotionStore { entries: std::collections::HashMap::new(), path: std::path::PathBuf::from(".guardpatch/promotion.json") };
+        let result = store.promote("src/core.ts", PromotionState::Protected, "human".to_string(), vec![]);
+        assert!(result.is_err(), "promoting to Protected without evidence should fail");
+        assert!(result.unwrap_err().to_string().contains("evidence"));
+    }
+
+    #[test]
+    fn test_promote_to_frozen_requires_evidence() {
+        let mut store = PromotionStore { entries: std::collections::HashMap::new(), path: std::path::PathBuf::from(".guardpatch/promotion.json") };
+        let result = store.promote("src/core.ts", PromotionState::Frozen, "human".to_string(), vec![]);
+        assert!(result.is_err(), "promoting to Frozen without evidence should fail");
+    }
+
+    #[test]
+    fn test_promote_to_protected_with_evidence_succeeds() {
+        let mut store = PromotionStore { entries: std::collections::HashMap::new(), path: std::path::PathBuf::from(".guardpatch/promotion.json") };
+        let result = store.promote("src/core.ts", PromotionState::Protected, "human".to_string(), vec!["tests".to_string(), "user_approval".to_string()]);
+        assert!(result.is_ok(), "promoting to Protected with evidence should succeed");
+    }
+
+    #[test]
+    fn test_promote_to_stable_without_evidence_allowed() {
+        let mut store = PromotionStore { entries: std::collections::HashMap::new(), path: std::path::PathBuf::from(".guardpatch/promotion.json") };
+        let result = store.promote("src/core.ts", PromotionState::Stable, "human".to_string(), vec![]);
+        assert!(result.is_ok(), "promoting to Stable without evidence should still be allowed");
     }
 }

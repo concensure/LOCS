@@ -12,6 +12,12 @@ pub struct VerificationReport {
     pub summary: String,
     pub lines_changed: usize,
     pub protected_symbols_touched: usize,
+    /// Suggested remediation step for Rejected/ReviewRequired decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<String>,
+    /// Which policy rule triggered the decision (derived from the reason string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_source: Option<String>,
 }
 
 impl VerificationReport {
@@ -28,6 +34,8 @@ impl VerificationReport {
             Decision::ProposalOnly(reason) => format!("Patch accepted as proposal only: {}", reason),
         };
 
+        let (fix_hint, rule_source) = Self::derive_hints(&decision, &files_checked);
+
         Self {
             timestamp: Utc::now(),
             decision,
@@ -35,6 +43,99 @@ impl VerificationReport {
             summary,
             lines_changed,
             protected_symbols_touched,
+            fix_hint,
+            rule_source,
+        }
+    }
+
+    fn derive_hints(decision: &Decision, files: &[PathBuf]) -> (Option<String>, Option<String>) {
+        let file_hint = files.first()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<file>".to_string());
+
+        match decision {
+            Decision::Rejected(reason) => {
+                let (hint, source) = if reason.contains("protected (mode=Protected)") || reason.contains("protected (mode=Frozen)") {
+                    (
+                        format!(
+                            "Run: guardpatch unlock {} --reason \"<reason>\" --scope one_patch",
+                            file_hint
+                        ),
+                        "path protection rule (.guardpatch.yml paths[])".to_string(),
+                    )
+                } else if reason.contains("locked symbol") {
+                    (
+                        "Remove the symbol from lock_symbols in .guardpatch.yml, or target a different symbol.".to_string(),
+                        "lock_symbols (.guardpatch.yml)".to_string(),
+                    )
+                } else if reason.contains("locked signature") {
+                    (
+                        "Body edits are allowed; only the function signature is locked.".to_string(),
+                        "lock_signatures (.guardpatch.yml)".to_string(),
+                    )
+                } else if reason.contains("locked section") {
+                    (
+                        "Use guardpatch unlock or remove the section from lock_sections in .guardpatch.yml.".to_string(),
+                        "lock_sections (.guardpatch.yml)".to_string(),
+                    )
+                } else if reason.contains("locked first") {
+                    (
+                        "Edit lines past the locked header range, or reduce lock_first_lines in .guardpatch.yml.".to_string(),
+                        "lock_first_lines (.guardpatch.yml)".to_string(),
+                    )
+                } else if reason.contains("Exported symbol") {
+                    (
+                        "Restore the exported symbol or disable lock_exports in .guardpatch.yml.".to_string(),
+                        "lock_exports (.guardpatch.yml)".to_string(),
+                    )
+                } else if reason.contains("LOCS metadata") || reason.contains("Removal of LOCS") {
+                    (
+                        "Preserve the LOCS metadata block. Use guardpatch unlock if intentional metadata edits are needed.".to_string(),
+                        "LOCS metadata protection (built-in)".to_string(),
+                    )
+                } else if reason.contains("Region") && reason.contains("locked by file policy") {
+                    (
+                        format!(
+                            "Edit a different region, or remove the region from locked_regions in the LOCS guard block of {}.",
+                            file_hint
+                        ),
+                        "per-file LOCS guard.locked_regions".to_string(),
+                    )
+                } else if reason.contains("Agent") && reason.contains("not permitted") {
+                    (
+                        "Check the agent's allow/deny patterns in .guardpatch.yml agents[].".to_string(),
+                        "agent authority profile (.guardpatch.yml agents[])".to_string(),
+                    )
+                } else if reason.contains("exceeding limit") {
+                    (
+                        "Split the patch into smaller chunks, or raise patch_limits in .guardpatch.yml.".to_string(),
+                        "patch_limits (.guardpatch.yml)".to_string(),
+                    )
+                } else {
+                    (reason.clone(), "policy rule".to_string())
+                };
+                (Some(hint), Some(source))
+            }
+            Decision::ReviewRequired(reason) => {
+                let hint = if reason.contains("evidence") {
+                    format!(
+                        "Run: guardpatch promote {} --to stable --evidence tests,typecheck",
+                        file_hint
+                    )
+                } else if reason.contains("weakening") {
+                    "Submit for human review: guardpatch review list".to_string()
+                } else {
+                    format!(
+                        "Run: guardpatch review list  (or approve via: guardpatch review approve <id>)"
+                    )
+                };
+                (Some(hint), Some("review_required policy".to_string()))
+            }
+            Decision::ProposalOnly(_) => (
+                Some("Run: guardpatch review list  then: guardpatch review approve <id>".to_string()),
+                Some("proposal_only agent mode".to_string()),
+            ),
+            Decision::Allowed => (None, None),
         }
     }
 
@@ -42,6 +143,12 @@ impl VerificationReport {
         let mut out = String::from("--- GuardPatch Report ---\n");
         out.push_str(&format!("Status:   {:?}\n", self.decision));
         out.push_str(&format!("Summary:  {}\n", self.summary));
+        if let Some(ref hint) = self.fix_hint {
+            out.push_str(&format!("Fix:      {}\n", hint));
+        }
+        if let Some(ref source) = self.rule_source {
+            out.push_str(&format!("Rule:     {}\n", source));
+        }
         out.push_str(&format!("Files:    {:?}\n", self.files_checked));
         out.push_str(&format!("Lines:    {}\n", self.lines_changed));
         out.push_str("-------------------------\n");
@@ -185,5 +292,55 @@ impl AuditStore {
         }
 
         Ok(reports.into_iter().rev().take(limit).collect())
+    }
+
+    /// Count entries in the audit log without loading all into memory.
+    pub fn entry_count(&self) -> anyhow::Result<usize> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+        if !self.log_path.exists() {
+            return Ok(0);
+        }
+        let reader = BufReader::new(File::open(&self.log_path)?);
+        Ok(reader.lines().filter(|l| l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)).count())
+    }
+
+    /// Archive the current log to `audit.YYYY-MM-DD.jsonl` and start fresh.
+    /// Only rotates if the current log has more than `max_entries` entries.
+    /// Returns the archive path if rotation happened, or None if not needed.
+    pub fn rotate(&self, max_entries: usize) -> anyhow::Result<Option<std::path::PathBuf>> {
+        use std::fs;
+        let count = self.entry_count()?;
+        if count <= max_entries {
+            return Ok(None);
+        }
+
+        let date_str = Utc::now().format("%Y-%m-%d").to_string();
+        let archive_name = format!(
+            "audit.{}.jsonl",
+            date_str,
+        );
+        let archive_path = self.log_path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(&archive_name);
+
+        // Resolve naming collisions with a counter suffix
+        let archive_path = if archive_path.exists() {
+            let mut i = 1u32;
+            loop {
+                let candidate = self.log_path.parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(format!("audit.{}.{}.jsonl", date_str, i));
+                if !candidate.exists() {
+                    break candidate;
+                }
+                i += 1;
+            }
+        } else {
+            archive_path
+        };
+
+        fs::rename(&self.log_path, &archive_path)?;
+        Ok(Some(archive_path))
     }
 }
