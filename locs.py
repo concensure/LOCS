@@ -248,10 +248,17 @@ Generate only:
 1. `locs new <id>`
 2. implement the module
 3. `locs score <file> --write`
-4. `locs validate <file>`
-5. `locs register <file>`
-6. optional shared publication via `locs register <file> --scope shared`
-7. `locs bootstrap --limit 5`
+4. `locs validate <file>`  — fix all failures before the next step
+5. `git add <file>`  — stage only after validate passes
+6. `locs register <file>`
+7. optional shared publication via `locs register <file> --scope shared`
+8. `locs bootstrap --limit 5`
+
+To discover files that look like capabilities but lack LOCS headers:
+
+```bash
+locs audit
+```
 """
 
 _INIT_SESSION_INIT_MD = """\
@@ -273,19 +280,27 @@ locs new <id>
 locs score <file> --write
 locs validate <file>
 # validate prints AST backend and token backend so you know validation confidence
+# Fix ALL failures before proceeding — do not git add a file that fails validation
 
-# 4. Register locally by default
+# 4. Stage only after validation passes
+git add <file>
+
+# 5. Register locally by default
 locs register <file>
 # registration updates .locs.index.json for fast bootstrap
 
-# 5. Optional shared publication
+# 6. Optional shared publication
 locs register <file> --scope shared
 
-# 6. Bootstrap compact context (uses index when available)
+# 7. Bootstrap compact context (uses index when available)
 locs bootstrap --category <slug> --limit 5
 
-# 7. Rebuild index if needed
+# 8. Rebuild index if needed
 locs index rebuild
+
+# Discover ungoverned capability files (run in CI or on demand — never blocks commits)
+locs audit
+locs audit --format json --exit-nonzero   # CI mode: exits 1 if any found
 ```
 
 ---
@@ -298,6 +313,9 @@ locs index rebuild
 - Trust AST-backed validation (exact) over regex fallback; check the confidence line in validate output.
 - Load implementations only after registry and metadata routing.
 - Stability follows the v2 lifecycle: draft → active → stabilising → stable → protected → frozen.
+- `locs validate` is a generation-time gate, not a commit-time gate. Run it before `git add`.
+- `locs audit` is informational only — it never blocks a commit. Use it in CI or on demand.
+- Never install the pre-commit hook globally. Use `locs hook install` to scope it to the current repo.
 """
 
 _INIT_PRE_COMMIT = """\
@@ -348,13 +366,16 @@ This project uses LOCS v2.0. When writing or editing source files:
 
 - Load `LOCS_SKILL.md` for generation rules before creating any module
 - Load `LOCS_SESSION_INIT.md` to activate the session workflow
-- Use `locs validate <file>` before registering any module
 - Use `locs new <id>` to scaffold new capability files
+- Run `locs score <file> --write` then `locs validate <file>` before staging with `git add`
+- Fix ALL validation failures before staging — do not bypass with `git add -f`
 - Use `locs bootstrap --limit 5` to load compact routing context
+- Use `locs audit` to discover files that look like capabilities but lack LOCS headers
 
 Stability levels: draft → active → stabilising → stable → protected → frozen
 
 Run `locs status` to see the current registry.
+Run `locs hook status` to check whether the pre-commit hook is installed.
 """
 
 
@@ -1629,6 +1650,25 @@ _INIT_IGNORE_DIRS = {
     ".venv", "venv", ".tox", "dist", "build", ".mypy_cache",
 }
 
+_AUDIT_IGNORE_DIRS = _INIT_IGNORE_DIRS | {
+    "tests", "test", "spec", "__tests__",
+    "docs", "fixtures", "examples", "scripts", "migrations",
+}
+_AUDIT_IGNORE_STEMS = {
+    "__init__", "config", "configuration", "types", "type", "constants", "const",
+    "index", "setup", "conftest", "settings", "globals", "mod",
+    "base", "abstract", "interface", "proto", "stubs",
+}
+_AUDIT_EXPORT_PATTERNS = [
+    r"^export\s+(?:default\s+)?(?:function|class|const|let|var|type|interface|enum|abstract)\s+\w",
+    r"^def\s+[a-z_]\w*\s*\(",
+    r"^class\s+[A-Z]\w*",
+    r"^pub\s+(?:fn|struct|enum|trait|impl)\s+\w",
+    r"^func\s+[A-Z]\w*\s*\(",
+    r"^public\s+(?:static\s+)?(?:class|interface|void|int|String|boolean)\s+\w",
+]
+_AUDIT_COMMENT_PREFIXES = ("#", "//", "*", "/*", "*/", "--", "=begin", "=end", "<!--", "-->")
+
 
 def _scan_project_for_init(root: Path) -> dict:
     ext_counts: dict[str, int] = {}
@@ -1918,6 +1958,135 @@ def cmd_init(args):
     print("  next: locs new <domain.verb-noun>  to scaffold your first module")
 
 
+def cmd_audit(args):
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    min_loc = args.min_loc
+    candidates: list[dict[str, str]] = []
+
+    for path in sorted(root.rglob("*")):
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(p in _AUDIT_IGNORE_DIRS for p in rel.parts):
+            continue
+        if not path.is_file():
+            continue
+        if path.suffix not in _INIT_SOURCE_EXTS:
+            continue
+        if path.stem.lower() in _AUDIT_IGNORE_STEMS:
+            continue
+
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        if "@locs-version" in text or "locs-version:" in text:
+            continue
+
+        loc = sum(
+            1 for line in text.splitlines()
+            if line.strip() and not line.strip().startswith(_AUDIT_COMMENT_PREFIXES)
+        )
+        if loc < min_loc:
+            continue
+
+        has_exports = any(
+            re.search(pattern, text, re.MULTILINE)
+            for pattern in _AUDIT_EXPORT_PATTERNS
+        )
+        if not has_exports:
+            continue
+
+        candidates.append({"file": str(rel).replace("\\", "/"), "loc": str(loc)})
+
+    if args.format == "json":
+        print(json.dumps(
+            {"ungoverned_candidates": candidates, "count": len(candidates)},
+            indent=2,
+        ))
+    else:
+        if not candidates:
+            print("audit: no ungoverned capability candidates found")
+        else:
+            print(f"audit: {len(candidates)} file(s) look like capabilities but lack @locs-version headers")
+            print("  Tip: run `locs new <id>` to scaffold a governed replacement, or add a LOCS header manually.")
+            print()
+            for entry in candidates:
+                print(f"  {entry['file']}  ({entry['loc']} LOC)")
+
+    if args.exit_nonzero and candidates:
+        sys.exit(1)
+
+
+def _find_git_root(start: Path) -> Path | None:
+    current = start.resolve()
+    for _ in range(8):
+        if (current / ".git").is_dir():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def cmd_hook(args):
+    repo_root = Path(args.repo).resolve() if args.repo else Path.cwd()
+    git_root = _find_git_root(repo_root)
+
+    if args.hook_command == "install":
+        if git_root is None:
+            print("ERROR: not inside a git repository")
+            sys.exit(1)
+        hook_path = git_root / ".git" / "hooks" / "pre-commit"
+        _install_pre_commit_hook(hook_path, _INIT_PRE_COMMIT)
+
+    elif args.hook_command == "uninstall":
+        if git_root is None:
+            print("ERROR: not inside a git repository")
+            sys.exit(1)
+        hook_path = git_root / ".git" / "hooks" / "pre-commit"
+        if not hook_path.exists():
+            print("  no pre-commit hook found")
+            return
+        text = hook_path.read_text(encoding="utf-8")
+        if "[locs]" not in text:
+            print("  no LOCS block found in pre-commit hook — nothing to remove")
+            return
+        lines = text.splitlines()
+        locs_start = next(
+            (i for i, line in enumerate(lines) if "LOCS pre-commit hook" in line),
+            None,
+        )
+        if locs_start is None:
+            print("  could not locate LOCS block precisely — remove manually")
+            return
+        remaining = "\n".join(lines[:locs_start]).rstrip()
+        shebang_only = not remaining or remaining == "#!/usr/bin/env bash"
+        if shebang_only:
+            hook_path.unlink()
+            print("  removed  .git/hooks/pre-commit")
+        else:
+            hook_path.write_text(remaining + "\n", encoding="utf-8")
+            print("  removed LOCS block from  .git/hooks/pre-commit")
+
+    elif args.hook_command == "status":
+        if git_root is None:
+            print("  not inside a git repository")
+            return
+        hook_path = git_root / ".git" / "hooks" / "pre-commit"
+        if not hook_path.exists():
+            print("  no pre-commit hook installed")
+            print("  run `locs hook install` to add LOCS validation")
+        elif "[locs]" in hook_path.read_text(encoding="utf-8"):
+            print(f"  LOCS pre-commit hook installed at {hook_path}")
+        else:
+            print(f"  pre-commit hook exists at {hook_path} but has no LOCS block")
+            print("  run `locs hook install` to add LOCS validation")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="locs", description="LOCS CLI v2.0")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1979,6 +2148,27 @@ def main():
     p_init.add_argument("--no-claude-md", action="store_true",
                         help="Skip CLAUDE.md creation/patch")
 
+    p_audit = sub.add_parser("audit", help="Find ungoverned capability files (no LLM, no blocking)")
+    p_audit.add_argument("directory", nargs="?", default=None, metavar="DIR",
+                         help="Directory to scan (default: current directory)")
+    p_audit.add_argument("--min-loc", type=int, default=30, dest="min_loc",
+                         help="Minimum non-comment LOC to flag a file (default: 30)")
+    p_audit.add_argument("--format", choices=["text", "json"], default="text",
+                         help="Output format (default: text)")
+    p_audit.add_argument("--exit-nonzero", action="store_true", dest="exit_nonzero",
+                         help="Exit with code 1 if ungoverned files are found (for CI)")
+
+    p_hook = sub.add_parser("hook", help="Manage the LOCS pre-commit hook (repo-local only)")
+    p_hook_sub = p_hook.add_subparsers(dest="hook_command", required=True)
+    for _sub_name, _sub_help in [
+        ("install", "Install the LOCS pre-commit hook in the current repo"),
+        ("uninstall", "Remove the LOCS pre-commit hook from the current repo"),
+        ("status", "Check whether the LOCS pre-commit hook is installed"),
+    ]:
+        _p = p_hook_sub.add_parser(_sub_name, help=_sub_help)
+        _p.add_argument("--repo", default=None, metavar="DIR",
+                        help="Path to the git repo root (default: current directory)")
+
     args = parser.parse_args()
     {
         "new": cmd_new,
@@ -1989,6 +2179,8 @@ def main():
         "bootstrap": cmd_bootstrap,
         "index": cmd_index,
         "init": cmd_init,
+        "audit": cmd_audit,
+        "hook": cmd_hook,
     }[args.command](args)
 
 

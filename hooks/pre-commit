@@ -1,27 +1,22 @@
 #!/usr/bin/env bash
 # LOCS pre-commit hook
 # Validates every staged LOCS module before allowing a commit.
+# Scope: repo-local only. Install with: locs hook install
 #
-# Install: copy to .git/hooks/pre-commit and chmod +x
-# Or run:  bash hooks/install-hooks.sh
-
+# Manual install: copy to .git/hooks/pre-commit and chmod +x
+# Or run:        locs hook install
 set -euo pipefail
 
-LOCS_CLI="$(git rev-parse --show-toplevel)/locs.py"
-
-if [[ ! -f "$LOCS_CLI" ]]; then
-  echo "[locs] locs.py not found at $LOCS_CLI — skipping LOCS validation"
+if ! command -v locs &>/dev/null; then
+  echo "[locs] locs CLI not found in PATH — skipping LOCS validation"
   exit 0
 fi
 
-# collect staged files that look like LOCS modules
-# a LOCS module contains @locs-version in its header
 STAGED=$(git diff --cached --name-only --diff-filter=ACM)
 LOCS_FILES=()
-
 for f in $STAGED; do
   [[ -f "$f" ]] || continue
-  if grep -q "@locs-version" "$f" 2>/dev/null; then
+  if grep -qE "(@locs-version|locs-version:)" "$f" 2>/dev/null; then
     LOCS_FILES+=("$f")
   fi
 done
@@ -31,14 +26,9 @@ if [[ ${#LOCS_FILES[@]} -eq 0 ]]; then
 fi
 
 echo "[locs] validating ${#LOCS_FILES[@]} staged module(s)..."
-
 FAILED=0
 for f in "${LOCS_FILES[@]}"; do
-  if python3 "$LOCS_CLI" validate "$f"; then
-    :
-  else
-    FAILED=$((FAILED + 1))
-  fi
+  if locs validate "$f"; then :; else FAILED=$((FAILED + 1)); fi
 done
 
 if [[ $FAILED -gt 0 ]]; then
@@ -47,6 +37,5 @@ if [[ $FAILED -gt 0 ]]; then
   echo "       fix the issues above, then re-stage and commit"
   exit 1
 fi
-
 echo "[locs] all modules passed — proceeding with commit"
 exit 0

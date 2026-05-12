@@ -53,7 +53,14 @@ Generate only:
 1. `locs new <id>`
 2. implement the module
 3. `locs score <file> --write`
-4. `locs validate <file>`
-5. `locs register <file>`
-6. optional shared publication via `locs register <file> --scope shared`
-7. `locs bootstrap --limit 5`
+4. `locs validate <file>`  — fix all failures before the next step
+5. `git add <file>`  — stage only after validate passes
+6. `locs register <file>`
+7. optional shared publication via `locs register <file> --scope shared`
+8. `locs bootstrap --limit 5`
+
+To discover files that look like capabilities but lack LOCS headers:
+
+```bash
+locs audit
+```

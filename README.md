@@ -1,4 +1,4 @@
-# LOCS - LLM-Optimised Capability Specification (v2.0)
+# LOCS - LLM-Optimised Capability Specification (v2.1)
 
 **LOCS** is a portable framework for writing code that LLMs can reliably read, retrieve, compose, and govern. It transforms a standard codebase into a machine-readable capability marketplace.
 
@@ -56,6 +56,22 @@ draft → active → stabilising → stable → protected → frozen
 `LOCS_GRAND_REGISTRY.md` is optional and exists for cross-project sharing. Use it only when shared capability reuse is worth the larger search surface.
 
 A `.locs.index.json` sidecar is maintained automatically by `locs register` for fast O(1) category and domain lookups. Run `locs index rebuild` to regenerate it from the registry table.
+
+---
+
+## Enforcement Model
+
+LOCS uses a layered enforcement strategy tuned for AI-assisted coding workflows:
+
+| Layer | Tool | Blocks? | When |
+|---|---|---|---|
+| **Generation** | `LOCS_SKILL.md` / `CLAUDE.md` | — | AI reads rules at session start; follows them natively |
+| **Pre-stage** | `locs validate <file>` | Dev-enforced | Before `git add`; fix failures before staging |
+| **Pre-commit** | `.git/hooks/pre-commit` | Yes | Validates files already carrying `@locs-version`; fast grep + CLI |
+| **Advisory** | `locs audit` | No | On demand or in CI; finds ungoverned capability candidates |
+| **Merge gate** | `locs audit --exit-nonzero` | Optional | CI step on PR; can block merge if ungoverned files accumulate |
+
+The pre-commit hook validates only files that already declared `@locs-version` — it never blocks commits on unannotated files. `locs audit` handles discovery without touching the commit path.
 
 ---
 
@@ -136,6 +152,8 @@ pip install locs-cli && locs init
 | `--no-hook` | Skip pre-commit hook installation |
 | `--no-claude-md` | Skip `CLAUDE.md` creation/patch |
 
+The pre-commit hook installed by `locs init` (and `locs hook install`) is **repo-local only** — it is never installed globally. It validates only files that already carry a `@locs-version` header, so it does not block commits on unannotated files.
+
 To install into a different directory:
 
 ```bash
@@ -198,6 +216,7 @@ locs score graph_smart_port_selector.py --write --tokenizer transformers --model
 locs score graph_smart_port_selector.py --write --tokenizer sentencepiece --tokenizer-resource .\gemini.model
 
 # Validate (prints AST and token backend confidence)
+# Run this BEFORE git add — fix all failures before staging
 locs validate graph_smart_port_selector.py
 
 # Register locally (also updates .locs.index.json)
@@ -212,6 +231,20 @@ locs bootstrap --category graph --limit 5
 # Registry index management
 locs index status
 locs index rebuild
+
+# Audit: find files that look like capabilities but lack @locs-version headers
+# Never blocks — informational only. Run on demand or in CI.
+locs audit
+locs audit src/                        # scan a specific directory
+locs audit --min-loc 50               # raise the LOC threshold
+locs audit --format json              # machine-readable output
+locs audit --exit-nonzero             # CI mode: exits 1 if any ungoverned files found
+
+# Hook management (repo-local only — never global)
+locs hook status                      # check whether the hook is installed
+locs hook install                     # install pre-commit hook in the current repo
+locs hook install --repo /other/repo  # install in a specific repo
+locs hook uninstall                   # remove the hook
 ```
 
 ---
