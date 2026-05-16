@@ -1218,7 +1218,7 @@ def cmd_new(args):
         ".ts": {
             "interface": "// PUBLIC INTERFACE\nexport declare function {fn_name}(params: any): any;",
             "contract": "// BEHAVIOUR CONTRACT\n/**\n * - Pure function\n */",
-            "impl": "// CORE IMPLEMENTATION\nexport function {fn_name}(params: any): any {\n  return null;\n}",
+            "impl": "// CORE IMPLEMENTATION\nexport function {fn_name}(params: any): any {{\n  return null;\n}}",
             "example": "// EXAMPLE USAGE\n// {fn_name}(...);",
         },
         ".py": {

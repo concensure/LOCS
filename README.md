@@ -1,4 +1,4 @@
-# LOCS - LLM-Optimised Capability Specification (v2.1)
+# LOCS - LLM-Optimised Capability Specification (v2.1.1)
 
 **LOCS** is a portable framework for writing code that LLMs can reliably read, retrieve, compose, and govern. It transforms a standard codebase into a machine-readable capability marketplace.
 
